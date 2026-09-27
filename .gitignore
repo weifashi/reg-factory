@@ -79,3 +79,6 @@ dist/
 build/
 screenshots_vision/
 .custom_test_domain
+
+# Reproducible onboarding test dependency lock.
+!requirements-onboarding.lock

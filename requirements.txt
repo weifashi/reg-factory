@@ -10,3 +10,6 @@ Appium-Python-Client>=4.0.0
 selenium>=4.0.0
 fastapi
 uvicorn[standard]
+
+# Onboarding PostgreSQL driver; included when installing this requirements file.
+psycopg[binary]==3.3.6

@@ -10,6 +10,8 @@ webui/server.py — reg-factory 本地 Web 面板后端(FastAPI)。
 启动：  python -m uvicorn webui.server:app --port 8799   (或用 start.bat)
 """
 import asyncio
+import functools
+import inspect
 import base64
 import contextlib
 import hmac
@@ -38,6 +40,13 @@ from fastapi.staticfiles import StaticFiles
 
 # 启动前由系统显式提供的变量始终优先于 WebUI 保存的 .env。
 BOOT_ENV = dict(os.environ)
+_ONBOARDING_MODE = BOOT_ENV.get("ONBOARDING_MODE", "off")
+if _ONBOARDING_MODE not in {"off", "protected"}:
+    raise RuntimeError("INVALID_ONBOARDING_MODE")
+_PROTECTED_MODE = _ONBOARDING_MODE == "protected"
+_ONBOARDING_POOL_MODE = BOOT_ENV.get("ONBOARDING_POOL_MODE", "off")
+if _ONBOARDING_POOL_MODE not in {"off", "synthetic"}:
+    raise RuntimeError("INVALID_ONBOARDING_POOL_MODE")
 
 # 项目根 = webui 的上一级
 ROOT = (
@@ -193,7 +202,7 @@ def _git_version():
     return "archive"
 
 
-WEBUI_VERSION = _git_version()
+WEBUI_VERSION = "protected" if _PROTECTED_MODE else _git_version()
 
 
 def _ensure_proxy_env():
@@ -479,7 +488,7 @@ def _update_child_env():
             bypass.append(host)
     child_env["NO_PROXY"] = child_env["no_proxy"] = ",".join(bypass)
     child_env["REG_FACTORY_NONINTERACTIVE"] = "1"
-    return child_env
+    return _strip_control_env(child_env)
 
 
 def _read_update_result():
@@ -858,6 +867,9 @@ def _apply_saved_env(updates):
             os.environ.pop(key, None)
         else:
             os.environ[key] = value
+
+    if _PROTECTED_MODE:
+        return
 
     import importlib
     # Provider adapters cache environment-backed defaults at import time. They
@@ -2201,6 +2213,8 @@ async def _plus_trial_gate(path: str, method: str, body: bytes):
 
 
 async def _proxy_local_plus(request: Request, upstream_path: str, body: bytes | None = None):
+    if _PROTECTED_MODE:
+        return _legacy_blocked()
     _plus_runtime_environment()
     if not _plus_health():
         await asyncio.to_thread(_start_plus_service_sync)
@@ -2708,7 +2722,9 @@ async def api_gopay_payment_otp(job_id: str, request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return open(os.path.join(WEBUI, "static", "index.html"), encoding="utf-8").read()
+    page = "onboarding.html" if _PROTECTED_MODE else "index.html"
+    with open(os.path.join(WEBUI, "static", page), encoding="utf-8") as stream:
+        return stream.read()
 
 
 @app.post("/api/update")
@@ -3126,53 +3142,176 @@ async def api_proxy_test(platform: str = ""):
         return JSONResponse({"ok": False, "error": str(exc)[:180]}, status_code=400)
 
 
+def _control_env_keys(*sources):
+    """Server-only names and explicitly referenced custom DSN/key variables."""
+    sources = (BOOT_ENV, os.environ, _parse_env_file(ENV_PATH), *sources)
+    forbidden = set()
+    for source in sources:
+        for key, value in source.items():
+            if key.startswith(("ONBOARDING_", "RF_ONBOARDING_")):
+                forbidden.add(key)
+                if key.endswith(("_ENV", "_ENV_KEY", "_ENV_KEYS")):
+                    forbidden.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(value)))
+    return forbidden
+
+
+def _strip_control_env(env):
+    forbidden = _control_env_keys(env)
+    return {key: value for key, value in env.items() if key not in forbidden}
+
+
+def _sensitive_env(item, value=""):
+    key = item["key"].upper()
+    if item.get("secret") or any(part in key for part in ("PASSWORD", "SECRET", "TOKEN", "API_KEY", "HEADERS")):
+        return True
+    try:
+        url = urllib.parse.urlsplit(str(value))
+        if url.username is not None or url.password is not None:
+            return True
+        # Query/fragment credentials have no universal field names. Treat them
+        # conservatively instead of trying to enumerate auth/sig/token aliases.
+        return bool(url.query or url.fragment)
+    except ValueError:
+        # Invalid URL-like values must not become a redaction bypass.
+        return "://" in str(value)
+
+
+def _protected_error(code, request=None):
+    from webui.onboarding_auth import error_response
+    correlation_id = getattr(getattr(request, "state", None), "correlation_id", None)
+    return error_response(code, correlation_id=correlation_id)
+
+
+def _env_authorize(request):
+    if not _PROTECTED_MODE:
+        return None
+    actor = getattr(getattr(request, "state", None), "onboarding_actor", None)
+    if actor is None:
+        return _protected_error("UNAUTHENTICATED", request)
+    from onboarding import security, storage
+    from onboarding.errors import ServiceError
+    config = getattr(app.state, "onboarding_config", None)
+    if config is None or not config.ready:
+        return _protected_error("DEPENDENCY_UNAVAILABLE", request)
+    try:
+        with storage.unit_of_work(config.settings) as conn:
+            security.revalidate(conn, actor, "config:manage")
+    except ServiceError as exc:
+        return _protected_error(exc.code, request)
+    except Exception:
+        return _protected_error("DEPENDENCY_UNAVAILABLE", request)
+    return None
+
+
 @app.get("/api/env")
-def api_env_get():
-    # 若无 .env 用模板兜底
+def api_env_get(request: Request = None):
+    denied = _env_authorize(request)
+    if denied is not None:
+        return denied
     cur = _parse_env_file(ENV_PATH)
     if not cur and os.path.isfile(ENV_EXAMPLE):
         cur = _parse_env_file(ENV_EXAMPLE)
+    forbidden = _control_env_keys(cur) if _PROTECTED_MODE else set()
     groups = []
     for g in schema.ENV_SCHEMA:
         items = []
         for it in g["items"]:
-            items.append({
-                "key": it["key"],
-                "label": it.get("label", it["key"]),
-                "value": cur.get(it["key"], ""),
-                "required": it.get("required", False),
-                "secret": it.get("secret", False),
+            if it["key"] in forbidden:
+                continue
+            value = cur.get(it["key"], "")
+            secret = bool(it.get("secret", False))
+            if _PROTECTED_MODE:
+                secret = _sensitive_env(it, value) or _sensitive_env(it, it.get("default", ""))
+            item = {
+                "key": it["key"], "label": it.get("label", it["key"]),
+                "value": "" if _PROTECTED_MODE and secret else value,
+                "required": it.get("required", False), "secret": secret,
                 "help": it.get("help", ""),
-                "default": it.get("default", ""),
-                "type": it.get("type", "str"),
-                "choices": it.get("choices", []),
-                "advanced": it.get("advanced", False),
-                "smart": it.get("smart", False),
-            })
-        groups.append({
-            "group": g["group"],
-            "notice": g.get("notice", ""),
-            "notice_level": g.get("notice_level", ""),
-            "tests": g.get("tests", []),
-            "items": items,
-        })
+                "default": "" if _PROTECTED_MODE and secret else it.get("default", ""),
+                "type": it.get("type", "str"), "choices": it.get("choices", []),
+                "advanced": it.get("advanced", False), "smart": it.get("smart", False),
+            }
+            if _PROTECTED_MODE:
+                item["configured"] = bool(value)
+            items.append(item)
+        groups.append({"group": g["group"], "notice": g.get("notice", ""),
+                       "notice_level": g.get("notice_level", ""), "tests": g.get("tests", []), "items": items})
     return {"groups": groups, "env_exists": os.path.isfile(ENV_PATH)}
+
+
+def _validated_env_updates(data):
+    if not isinstance(data, dict) or not isinstance(data.get("env", {}), dict):
+        raise ValueError
+    if _PROTECTED_MODE and set(data) != {"env"}:
+        raise ValueError
+    raw = data.get("env", {})
+    declared = {it["key"]: it for group in schema.ENV_SCHEMA for it in group["items"]}
+    forbidden = _control_env_keys(raw)
+    current = _parse_env_file(ENV_PATH)
+    updates = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or key in forbidden:
+            raise ValueError
+        if key not in declared:
+            if _PROTECTED_MODE:
+                raise ValueError
+            continue
+        if _PROTECTED_MODE:
+            sensitive = _sensitive_env(declared[key], current.get(key, "")) or _sensitive_env(declared[key], value)
+            if isinstance(value, dict):
+                action = value.get("action")
+                if action in {"keep", "clear"} and set(value) == {"action"}:
+                    if action == "keep":
+                        continue
+                    value = ""
+                elif action == "replace" and set(value) == {"action", "value"}:
+                    value = value["value"]
+                    if not isinstance(value, str) or not value.strip():
+                        raise ValueError
+                else:
+                    raise ValueError
+            elif sensitive or not isinstance(value, str):
+                raise ValueError
+        else:
+            value = "" if value is None else str(value)
+        if any(char in value for char in ("\r", "\n", "\x00")):
+            raise ValueError
+        updates[key] = value
+    return updates
 
 
 @app.post("/api/env")
 async def api_env_set(request: Request):
-    data = await request.json()
-    updates = data.get("env") or {}
-    # 只接受 schema 里声明的 key，避免写入垃圾
-    allowed = set(schema.env_keys())
-    updates = {k: ("" if v is None else str(v)) for k, v in updates.items() if k in allowed}
+    denied = _env_authorize(request)
+    if denied is not None:
+        return denied
+    if _PROTECTED_MODE:
+        from webui.onboarding_auth import read_json
+        from onboarding.errors import ServiceError
+        try:
+            data = await read_json(request)
+        except ServiceError as exc:
+            return _protected_error(exc.code, request)
+    else:
+        try:
+            data = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "INVALID_INPUT"}, status_code=400)
+    try:
+        updates = _validated_env_updates(data)
+    except (ValueError, TypeError):
+        if _PROTECTED_MODE:
+            return _protected_error("INVALID_INPUT", request)
+        return JSONResponse({"error": "INVALID_INPUT"}, status_code=400)
+    # Recheck after body parsing; no await or legacy provider call after this point.
+    denied = _env_authorize(request)
+    if denied is not None:
+        return denied
     if not os.path.isfile(ENV_PATH) and os.path.isfile(ENV_EXAMPLE):
-        # 首次保存：以模板为底
-        import shutil
         shutil.copy(ENV_EXAMPLE, ENV_PATH)
     _write_env_file(ENV_PATH, updates)
     _apply_saved_env(updates)
-    return {"ok": True, "saved": len(updates), "effective_now": True}
+    return {"ok": True, "saved": len(updates), "effective_now": not _PROTECTED_MODE}
 
 
 def _build_cmd(script, args):
@@ -3228,6 +3367,8 @@ def _child_env(platform: str = ""):
     # Child tasks can spawn other platform workers; retain this marker so Grok
     # avoids navigating the registration browser away for an optional Device Flow.
     env["REG_FACTORY_WEBUI_TASK"] = "1"
+    if _PROTECTED_MODE:
+        return _strip_control_env(env)
     try:
         from common import proxy_switch
         if not platform:
@@ -3240,7 +3381,7 @@ def _child_env(platform: str = ""):
         env["HTTP_PROXY"] = env["HTTPS_PROXY"] = proxy
         env["http_proxy"] = env["https_proxy"] = proxy
         env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost,::1"
-    return env
+    return _strip_control_env(env)
 
 
 def _managed_task_files():
@@ -3699,6 +3840,8 @@ async def api_stop_all():
 @app.on_event("startup")
 async def startup_local_services():
     global K12_START_TASK
+    if _PROTECTED_MODE:
+        return
     auto_start = _read_config_val("K12_AUTO_START", "1").strip().lower() not in {"0", "false", "no", "off"}
     if auto_start and not _k12_alive():
         K12_START_TASK = asyncio.create_task(_start_k12_service())
@@ -3707,6 +3850,8 @@ async def startup_local_services():
 @app.on_event("shutdown")
 async def shutdown_local_services():
     global K12_START_TASK
+    if _PROTECTED_MODE:
+        return
     if K12_START_TASK and not K12_START_TASK.done():
         K12_START_TASK.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -3717,6 +3862,72 @@ async def shutdown_local_services():
     await asyncio.to_thread(_cleanup_registered_browser_profiles)
 
 
-_ensure_proxy_env()
-app.mount("/static", StaticFiles(directory=os.path.join(WEBUI, "static")), name="static")
+if not _PROTECTED_MODE:
+    _ensure_proxy_env()
 app.mount("/assets", StaticFiles(directory=os.path.join(ROOT, "assets")), name="assets")
+
+def _legacy_blocked():
+    return _protected_error("LEGACY_EXECUTION_BLOCKED")
+
+
+def _block_legacy_endpoint(endpoint):
+    if inspect.iscoroutinefunction(endpoint):
+        @functools.wraps(endpoint)
+        async def blocked(*args, **kwargs):
+            return _legacy_blocked()
+    else:
+        @functools.wraps(endpoint)
+        def blocked(*args, **kwargs):
+            return _legacy_blocked()
+    return blocked
+
+
+if _PROTECTED_MODE:
+    # A second boundary for direct handler calls, independent of ASGI auth.
+    for _route in app.routes:
+        _endpoint = getattr(_route, "endpoint", None)
+        if (_endpoint is not None and _endpoint.__module__ == __name__
+                and _endpoint.__name__ not in {"index", "api_env_get", "api_env_set"}):
+            _blocked = _block_legacy_endpoint(_endpoint)
+            globals()[_endpoint.__name__] = _blocked
+            _route.endpoint = _blocked
+            _route.dependant.call = _blocked
+    @app.get("/login", response_class=HTMLResponse)
+    def onboarding_login_page():
+        with open(os.path.join(WEBUI, "static", "onboarding-login.html"), encoding="utf-8") as stream:
+            return stream.read()
+
+    app.add_api_route("/onboarding", index, methods=["GET"], response_class=HTMLResponse)
+
+    from webui.onboarding_auth import install as _install_onboarding
+    from webui.onboarding_routes import register_routes as _register_onboarding_routes
+
+    _pool_keyring = _pool_mac = None
+    if _ONBOARDING_POOL_MODE == "synthetic":
+        try:
+            from onboarding.keyring import Keyring as _PoolKeyring
+            from onboarding.request_mac import RequestMac as _PoolRequestMac
+            _key_directory = BOOT_ENV.get("ONBOARDING_POOL_KEYRING_DIR")
+            _key_version = BOOT_ENV.get("ONBOARDING_POOL_KEY_VERSION")
+            if not _key_directory or not _key_version:
+                raise ValueError
+            _pool_keyring = _PoolKeyring(_key_directory, _key_version)
+            _pool_mac = _PoolRequestMac(_key_directory)
+        except Exception:
+            # No generation, fallback, key path in logs or real-provider mode.
+            _pool_keyring = _pool_mac = None
+
+    _onboarding_config = _install_onboarding(
+        app, mode=_ONBOARDING_MODE,
+        expected_origin=BOOT_ENV.get("ONBOARDING_ORIGIN"),
+        settings_path=BOOT_ENV.get("ONBOARDING_SETTINGS_FILE"),
+        pool_mode=_ONBOARDING_POOL_MODE, pool_keyring=_pool_keyring, pool_mac=_pool_mac,
+    )
+    _register_onboarding_routes(app, _onboarding_config)
+    if _onboarding_config.pool_ready:
+        from webui.onboarding_pool_routes import register_routes as _register_pool_routes
+        _register_pool_routes(app, _onboarding_config)
+
+
+# Exact protected asset handlers must run before the legacy directory mount.
+app.mount("/static", StaticFiles(directory=os.path.join(WEBUI, "static")), name="static")

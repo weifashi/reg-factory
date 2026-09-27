@@ -1,0 +1,12 @@
+# B3 isolated validation environment; no automatic browser binary download.
+psycopg[binary]==3.3.6
+cryptography==50.0.1
+fastapi==0.141.1
+uvicorn==0.53.0
+httpx==0.28.1
+# Required only by existing WebUI regression imports.
+requests==2.33.0
+
+# Import-only legacy regression and isolated browser UI validation (no browser download).
+playwright==1.63.0
+curl_cffi==0.16.3
