@@ -29,18 +29,50 @@ BUMP_SQL = {'{}=%s', 'version=version+1', 'updated_at=clock_timestamp()', ',',
 
 
 def bump_sql_problems(function):
-    """bump_task may compose only its reviewed fragments; column names come from the whitelisted loop key."""
-    found = []
+    """bump_task may compose only its reviewed fragments; its one identifier is the whitelisted loop key."""
+    found, parents = [], {}
     for node in ast.walk(function):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ('SQL', 'Identifier'):
-            args = node.args
-            if node.func.attr == 'SQL' and not (len(args) == 1 and isinstance(args[0], ast.Constant)
-                                                and args[0].value in BUMP_SQL):
-                found.append('unreviewed SQL fragment in bump_task: ' + ast.unparse(node))
-            if node.func.attr == 'Identifier' and not (len(args) == 1 and isinstance(args[0], ast.Name)
-                                                       and args[0].id == 'key'):
-                found.append('column identifier not taken from the whitelisted key: ' + ast.unparse(node))
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    def called(node, name):
+        return isinstance(node, ast.Call) and (
+            (isinstance(node.func, ast.Attribute) and node.func.attr == name)
+            or (isinstance(node.func, ast.Name) and node.func.id == name))
+    identifiers = []
+    for node in ast.walk(function):
+        if called(node, 'SQL') and not (len(node.args) == 1 and isinstance(node.args[0], ast.Constant)
+                                        and node.args[0].value in BUMP_SQL):
+            found.append('unreviewed SQL fragment in bump_task: ' + ast.unparse(node))
+        if called(node, 'Identifier'):
+            identifiers.append(node)
+        # The whitelist check covers `changes` only if nothing rewrites it afterwards.
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] \
+            if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else node.targets if isinstance(node, ast.Delete) else []
+        for target in targets:
+            if (isinstance(target, ast.Name) and target.id == 'changes') or \
+                    (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id == 'changes'):
+                found.append('bump_task rewrites changes: ' + ast.unparse(node).splitlines()[0])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) \
+                and node.func.value.id == 'changes' and node.func.attr in ('update', 'setdefault', 'pop', 'popitem',
+                                                                           'clear', '__setitem__', '__delitem__'):
+            found.append('bump_task rewrites changes: ' + ast.unparse(node))
+    for node in identifiers:
+        comprehension = parents.get(node)
+        while comprehension is not None and not isinstance(comprehension, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            comprehension = parents.get(comprehension)
+        generators = comprehension.generators if comprehension is not None else []
+        if not (len(node.args) == 1 and isinstance(node.args[0], ast.Name) and node.args[0].id == 'key'
+                and len(generators) == 1 and isinstance(generators[0].target, ast.Name) and generators[0].target.id == 'key'
+                and isinstance(generators[0].iter, ast.Name) and generators[0].iter.id == 'changes'):
+            found.append('column identifier not taken from `for key in changes`: ' + ast.unparse(node))
+    if len(identifiers) > 1:
+        found.append('bump_task builds %d identifiers (expected one)' % len(identifiers))
     return found
+
+
+def bump_definitions(tree):
+    return sum(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == 'bump_task'
+               for node in ast.walk(tree))
 
 
 def product_files():
@@ -179,8 +211,9 @@ def caller_violations(source, module):
 
 # A table as written in SQL: optional ONLY, optional (quoted) schema, (quoted) name.
 TABLE = r'(?:ONLY\s+)?(?:"?\w+"?\s*\.\s*)?"?(\w+)"?'
-COMMENTS = re.compile(r'--[^\n]*|/\*.*?\*/', re.S)
-UPDATE_HEAD = re.compile(r'\bUPDATE\s+' + TABLE + r'(?:\s+(?:AS\s+)?(?!SET\b)(\w+))?\s+SET\b', re.I)
+UPDATE_HEAD = re.compile(r'\bUPDATE\s+' + TABLE + r'(?:\s*\*)?(?:\s+(?:AS\s+)?(?!SET\b)"?(\w+)"?)?\s+SET\b', re.I)
+# Any UPDATE of a table; a protected one that UPDATE_HEAD cannot parse is reported, never skipped.
+UPDATE_ANY = re.compile(r'\bUPDATE\s+' + TABLE, re.I)
 UPSERT_HEAD = re.compile(r'\bINSERT\s+INTO\s+' + TABLE + r'[^;]*?\bON\s+CONFLICT\b[^;]*?\bDO\s+UPDATE\s+SET\b',
                          re.I | re.S)
 DELETE_FROM = re.compile(r'\bDELETE\s+FROM\s+' + TABLE, re.I)
@@ -210,28 +243,79 @@ TRIGGER_IMMUTABLE = set().union(*IMMUTABLE.values()) | {'version'}
 BUMP_TASK = ('onboarding/repository.py', 'bump_task')
 
 
+def quote_end(text, index):
+    """Index of the quote closing the literal opened at index, or None when it never closes.
+
+    E'...' strings take backslash escapes; a doubled quote is always an escaped quote.
+    """
+    char = text[index]
+    backslash = char == "'" and index > 0 and text[index - 1] in 'eE' and not (
+        index > 1 and (text[index - 2].isalnum() or text[index - 2] == '_'))
+    end = index + 1
+    while end < len(text):
+        if backslash and text[end] == '\\':
+            end += 2
+        elif text[end] == char and text[end + 1:end + 2] == char:
+            end += 2
+        elif text[end] == char:
+            return end
+        else:
+            end += 1
+    return None
+
+
 def scan(text, start=0):
     """(index, char, depth) outside quoted strings, quoted identifiers and dollar-quoted bodies.
 
-    depth counts ( and [; a negative depth means the text cannot be parsed reliably.
+    depth counts ( and [. An unterminated quote or dollar body yields one final (index, '', -1):
+    a negative depth always means the text cannot be parsed reliably.
     """
     depth, index = 0, start
     while index < len(text):
         char = text[index]
         if char in "'\"":
-            end = index + 1
-            while end < len(text) and not (text[end] == char and text[end + 1:end + 2] != char):
-                end += 2 if text[end] == char else 1
+            end = quote_end(text, index)
+            if end is None:
+                yield index, '', -1
+                return
             index = end + 1
             continue
         dollar = re.match(r'\$(\w*)\$', text[index:])
         if dollar:
             close = text.find(dollar.group(0), index + len(dollar.group(0)))
-            index = len(text) if close < 0 else close + len(dollar.group(0))
+            if close < 0:
+                yield index, '', -1
+                return
+            index = close + len(dollar.group(0))
             continue
         depth += (char in '([') - (char in ')]')
         yield index, char, depth
         index += 1
+
+
+def strip_comments(text):
+    """Drop -- and /* */ comments outside quoted strings and identifiers; '--' inside a literal stays.
+
+    Dollar-quoted bodies are function code, so comments inside them are dropped as well.
+    """
+    kept, index = [], 0
+    while index < len(text):
+        char = text[index]
+        if char in "'\"":
+            end = quote_end(text, index)
+            end = len(text) - 1 if end is None else end
+            kept.append(text[index:end + 1]); index = end + 1
+        elif text.startswith('--', index):
+            close = text.find('\n', index)
+            index = len(text) if close < 0 else close
+            kept.append(' ')
+        elif text.startswith('/*', index):
+            close = text.find('*/', index + 2)
+            index = len(text) if close < 0 else close + 2
+            kept.append(' ')
+        else:
+            kept.append(char); index += 1
+    return ''.join(kept)
 
 
 def set_clause(text, start):
@@ -246,13 +330,13 @@ def set_clause(text, start):
 
 def split_top(text, separator):
     """Top-level parts, or None when the brackets do not balance."""
-    parts, begin = [], 0
+    parts, begin, depth = [], 0, 0
     for index, char, depth in scan(text):
         if depth < 0:
             return None
         if char == separator and depth == 0:
             parts.append(text[begin:index]); begin = index + 1
-    return parts + [text[begin:]]
+    return None if depth != 0 else parts + [text[begin:]]
 
 
 def assignments(clause):
@@ -367,7 +451,11 @@ def module_strings(tree):
 def sql_violations(source, module):
     found = []
     for raw, function in sql_texts(source, module):
-        text = LOCK_CLAUSE.sub('FOR LOCK', COMMENTS.sub(' ', raw))
+        text = LOCK_CLAUSE.sub('FOR LOCK', strip_comments(raw))
+        heads = {match.start() for match in UPDATE_HEAD.finditer(text)}
+        for match in UPDATE_ANY.finditer(text):
+            if match.group(1).lower() in IMMUTABLE and match.start() not in heads:
+                found.append('unrecognized UPDATE head for %s in %s' % (match.group(1).lower(), module))
         for verb, pattern in (('UPDATE', UPDATE_HEAD), ('UPSERT', UPSERT_HEAD)):
             for match in pattern.finditer(text):
                 table = match.group(1).lower()
@@ -447,10 +535,19 @@ class NotCommittedGuardTests(unittest.TestCase):
         self.assertIn('version=version+1', literals)
         self.assertEqual(bump_sql_problems(bump), [])
         for name, extra in (('fragment', "    assignments += [sql.SQL('execution_scope=%s')]\n"),
-                            ('identifier', "    assignments += [sql.SQL('{}=%s').format(sql.Identifier('execution_scope'))]\n")):
+                            ('identifier', "    assignments += [sql.SQL('{}=%s').format(sql.Identifier('execution_scope'))]\n"),
+                            ('bare-sql', "    assignments += [SQL('execution_scope=%s')]\n"),
+                            ('rewritten-changes', "    changes['execution_scope'] = 'pool'\n"
+                                                  "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
+                            ('rebound-changes', "    changes = dict(changes, execution_scope='pool')\n"
+                                                "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
+                            ('literal-keys', "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in ('execution_scope',)]\n")):
             with self.subTest(smuggled=name):
                 source = 'def bump_task(conn, task, **changes):\n    assignments = []\n' + extra
                 self.assertTrue(bump_sql_problems(ast.parse(source).body[0]))
+        self.assertEqual(bump_definitions(tree), 1)
+        twice = 'def bump_task(conn, task, **changes):\n    pass\n\n\ndef bump_task(conn, task, **changes):\n    pass\n'
+        self.assertEqual(bump_definitions(ast.parse(twice)), 2)
 
     def test_proof_functions_called_only_from_their_routes(self):
         found = []
@@ -596,12 +693,22 @@ class NotCommittedGuardTests(unittest.TestCase):
             'array-value': "Q = 'UPDATE mailbox_registry SET group_ref=ARRAY[%s,%s]::text WHERE id=%s'\n",
             'alias-version': "Q = 'UPDATE onboarding_tasks t SET version=t.version+1 WHERE t.id=%s'\n",
             'table-version': "Q = 'UPDATE onboarding_tasks SET version=onboarding_tasks.version+1 WHERE id=%s'\n",
+            'quoted-alias-version': 'Q = \'UPDATE onboarding_tasks "t" SET version="t".version+1 WHERE "t".id=%s\'\n',
         }
         must_flag = {
             'excluded-version': "Q = 'INSERT INTO onboarding_tasks(id) VALUES(%s) ON CONFLICT (id) DO UPDATE SET version=EXCLUDED.version+1'\n",
             'other-table-version': "Q = 'UPDATE onboarding_tasks SET version=s.version+1 FROM src s WHERE onboarding_tasks.id=s.id'\n",
             'quoted-paren': 'Q = "UPDATE mailbox_registry SET group_ref=\')\', email_norm=%s WHERE id=%s"\n',
             'quoted-where': 'Q = "UPDATE mailbox_registry SET group_ref=\' WHERE \', email_norm=%s WHERE id=%s"\n',
+            'e-string-escape': 'Q = "UPDATE mailbox_registry SET group_ref=E\'\\\\\'\', email_norm=%s WHERE id=%s"\n',
+            'dash-literal': 'Q = "UPDATE mailbox_registry SET group_ref=\'--\', email_norm=%s WHERE id=%s"\n',
+            'unclosed-paren': "Q = 'UPDATE mailbox_registry SET group_ref=lower(%s, email_norm=%s WHERE id=%s'\n",
+            'extra-close-paren': "Q = 'UPDATE mailbox_registry SET group_ref=lower(%s)), email_norm=%s WHERE id=%s'\n",
+            'unterminated-quote': 'Q = "UPDATE mailbox_registry SET group_ref=\'x, email_norm=%s WHERE id=%s"\n',
+            'quoted-alias': 'Q = \'UPDATE mailbox_registry "m" SET email_norm=%s WHERE "m".id=%s\'\n',
+            'as-quoted-alias': 'Q = \'UPDATE mailbox_registry AS "m" SET email_norm=%s WHERE "m".id=%s\'\n',
+            'star-head': "Q = 'UPDATE mailbox_registry * SET email_norm=%s WHERE id=%s'\n",
+            'unrecognized-head': "Q = 'UPDATE mailbox_registry m WITH x SET email_norm=%s'\n",
         }
         for name, source in must_flag.items():
             with self.subTest(pattern=name):

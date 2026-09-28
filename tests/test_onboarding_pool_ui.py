@@ -220,7 +220,7 @@ class PoolDomTests(unittest.TestCase):
             if predicate():
                 return
             self.page.wait_for_timeout(20)
-        self.fail(reason)
+        self.timed_out('condition never held: ' + reason)
 
     def assert_quiet(self, method, path, count, window=300):
         """Bounded observation after settling: no further request of this kind appears."""
