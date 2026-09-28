@@ -56,7 +56,7 @@
     if (!value || typeof value.id !== 'string' || !Number.isSafeInteger(value.version) || value.version < 1) {
       task = null; $('#task-facts').hidden = true; $('#task-empty').hidden = false;
       $('#task-empty').textContent = '任务响应无效或版本超出安全范围；不能据此发送命令。';
-      controls(); return;
+      controls(); return false;
     }
     task = value; $('#task-empty').hidden = true; $('#task-facts').hidden = false; $('#task-facts').replaceChildren();
     const states = {QUEUED:'排队中',RUNNING:'合成执行中',PAUSED:'已暂停',CANCELLED_SAFE:'已安全取消',SUCCEEDED:'合成任务完成',WAIT_HUMAN:'等待人工',CONFLICT:'结果冲突'};
@@ -64,6 +64,7 @@
       const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = label; dd.textContent = String(content); $('#task-facts').append(dt, dd);
     }
     controls();
+    return true;
   }
   async function diagnostic() {
     const data = await api('/api/onboarding/diagnostics');
@@ -78,7 +79,10 @@
   $('#task-form').addEventListener('submit', async event => {
     event.preventDefault(); if (busy || !csrf) return;
     task = null; busy = true; controls();
-    try { renderTask(await api('/api/onboarding/tasks/' + encodeURIComponent($('#task-id').value.trim()))); message('已取得最新合成任务状态。', false); }
+    try {
+      if (renderTask(await api('/api/onboarding/tasks/' + encodeURIComponent($('#task-id').value.trim())))) message('已取得最新合成任务状态。', false);
+      else message('任务响应无效或版本超出安全范围，未显示；不能据此发送命令，请稍后重新查询。');
+    }
     catch (error) { $('#task-facts').hidden = true; $('#task-empty').hidden = false; fail(error); }
     finally { busy = false; controls(); }
   });
@@ -94,12 +98,13 @@
       if (!data || data.accepted !== true) throw {status:0};
       clearPendingCommand();
       message(command.action === 'recheck' ? '只读核验标记已受理；没有实际执行核验，也不会恢复任务。' : '本地操作已受理；不代表撤销任何外部结果。', false);
-      if (data.task) renderTask(data.task);
-      else {
+      if (data.task) {
+        if (!renderTask(data.task)) message('命令已受理，但返回的任务状态无效，未显示。请手动查询最新状态，不要重新发送命令。');
+      } else {
         task = null;
         try {
           const latest = await api('/api/onboarding/tasks/' + command.id);
-          if (!inactive) renderTask(latest);
+          if (!inactive && !renderTask(latest)) message('命令已受理，但刷新得到的任务状态无效，未显示。请手动查询最新状态，不要重新发送命令。');
         } catch (error) {
           if (inactive) return;
           fail(error);
@@ -110,8 +115,9 @@
     } catch (error) {
       if (inactive) return;
       task = null;
-      // Any rejection of a replay keeps it pending: environment checks before the receipt read
-      // also answer 409/422, so no status proves the original command never committed.
+      // A rejected replay stays pending unless the server proves this very command never committed
+      // (409 VERSION_CONFLICT with the not-committed flag) and the operator confirms: environment
+      // checks before the receipt read also answer 409/422, so no status alone proves anything.
       if (error.code === 'COMMIT_UNKNOWN' || !error.status || (error.status >= 500 && error.status <= 599)) pendingCommand = command;
       else if (command === pendingCommand && error.status === 409 && error.code === 'VERSION_CONFLICT' && error.notCommitted === true
                && window.confirm('服务端已证明原命令未提交且不会再提交（版本已变化）。解除后须重新查询最新状态。确认解除？')) {
@@ -184,6 +190,8 @@
     // Busy through the whole initial load (session and diagnostics), like the pool page.
     busy = true; $('#main').setAttribute('aria-busy','true');
     try {
+      // Read once per page and only cleared afterwards: releasing a pending command on the
+      // server's proof relies on this page never switching sessions.
       const data = await api('/api/auth/session'); if (inactive) return; csrf = data.csrf_token; permissions = new Set(data.permissions);
       $('#operator').textContent = data.display_name; $('#config-card').hidden = !permissions.has('config:manage'); controls();
       await diagnostic();

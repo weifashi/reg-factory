@@ -432,6 +432,35 @@ class MailboxUpdateTests(PoolCase):
         finally:
             self.set_migration_checksum(checksum)
 
+    def test_not_committed_proof_at_maximum_version(self):
+        # Spec C2: a mailbox at the maximum version can never accept an update that expects it.
+        mid = self.seed('max')[0]
+        with self.uow() as conn:
+            conn.execute('UPDATE mailbox_registry SET version=%s WHERE id=%s', (2**63 - 1, mid))
+        before = self.business_snapshot()
+        self.assertTrue(self.proof(lambda: self.update(mid, 2**63 - 1, key='fixture:max')))
+        self.assertEqual(before, self.business_snapshot())
+
+    def test_same_key_replay_proves_again_without_writing(self):
+        mid = self.seed('replay')[0]
+        self.update(mid, 1, key='fixture:first')                          # version 2
+        before = self.business_snapshot()
+        for attempt in ('first', 'replay'):
+            self.assertTrue(self.proof(lambda: self.update(mid, 1, key='fixture:stale')), attempt)
+        self.assertEqual(before, self.business_snapshot())
+
+    def test_no_proof_on_forbidden_or_idempotency_conflict(self):
+        mid = self.seed('reject')[0]
+        self.update(mid, 1, key='fixture:done')
+        for call, code in ((lambda: self.update(str(uuid4()), 1, key='fixture:missing'), ErrorCode.FORBIDDEN),
+                           (lambda: self.update(mid, 1, changes={'disabled': True}, key='fixture:done'),
+                            ErrorCode.IDEMPOTENCY_CONFLICT)):
+            with self.subTest(code=code.value):
+                with self.assertRaises(ServiceError) as caught:
+                    call()
+                self.assertEqual(caught.exception.code, code)
+                self.assertFalse(caught.exception.not_committed)
+
     def test_no_proof_when_migration_commits_before_tail_checks(self):
         mid = self.seed('race')[0]
         self.update(mid, 1, key='fixture:first')

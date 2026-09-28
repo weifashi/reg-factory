@@ -471,11 +471,17 @@ class MailboxImportTests(PoolCase):
         self.run_import(key='fixture:first')
         call = self.importer(self.other_text(), 'fixture:race')
         checksum = self.read('SELECT checksum FROM schema_migrations WHERE version=2')[0][0]
-        fired = []
+        fired, seen = [], []
         def hook(cursor, text):
-            if not fired and 'idempotency_key' in text:
+            # Spec 7.g: the drift commits after every proof read — the receipt, the same-email row,
+            # and the receipt re-read that follows the conflict.
+            if 'idempotency_key' in text and len(seen) == 2 and not fired:
                 fired.append(True)
                 self.set_migration_checksum('0' * 64)
+            elif 'idempotency_key' in text and not seen:
+                seen.append('receipt')
+            elif 'WHERE email_norm' in text and seen == ['receipt']:
+                seen.append('row')
         try:
             with after_query(hook):
                 flagged = self.proof(call)

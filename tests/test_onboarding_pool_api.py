@@ -605,3 +605,15 @@ class PoolApiDatabaseTests(PoolCase):
         body = self.error('POST', 'tasks/' + batch['task_ids'][0] + '/pause',
                           dict(expected_version=9, request_key='fixture:http-ahead'))
         self.assertEqual(set(body), {'code', 'correlation_id'})
+
+    def test_http_not_committed_on_cancel_and_recheck(self):
+        mid, batch_body, batch = self.seeded_batch()
+        task = batch['task_ids'][0]
+        version = self.call('GET', 'tasks/' + task)['version']
+        self.call('POST', 'tasks/' + task + '/pause', dict(expected_version=version, request_key='fixture:http-move'), 202)
+        for action in ('cancel', 'recheck'):
+            with self.subTest(action=action):
+                body = self.error('POST', 'tasks/' + task + '/' + action,
+                                  dict(expected_version=version, request_key='fixture:http-stale-' + action))
+                self.assertEqual(set(body), {'code', 'correlation_id', 'not_committed'})
+                self.assertIs(body['not_committed'], True)

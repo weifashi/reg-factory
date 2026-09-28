@@ -297,6 +297,8 @@ class PoolSchemaDatabaseTests(unittest.TestCase):
                     self.assertFalse(app.execute('SELECT has_table_privilege(current_user,%s,%s)', (table, action)).fetchone()[0],
                                      table + ' ' + action)
             self.assertFalse(app.execute("SELECT has_table_privilege(current_user,'global_configs','UPDATE')").fetchone()[0])
+            # A column-level grant would also break append-only while has_table_privilege stays false.
+            self.assertFalse(app.execute("SELECT has_any_column_privilege(current_user,'global_configs','UPDATE')").fetchone()[0])
 
     def test_app_grants_keep_history_append_only_and_functions_narrow(self):
         import psycopg

@@ -8,6 +8,7 @@ leave aria-busy and show the expected outcome. Fixed sleeps are only bounded
 "nothing further happens" windows after that point, never the sync itself.
 """
 import json
+import re
 from pathlib import Path
 import unittest
 from urllib.parse import urlsplit, parse_qs
@@ -47,7 +48,8 @@ NOT_PROOFS = [('string', (409, dict(code='VERSION_CONFLICT', not_committed='true
               ('false', (409, dict(code='VERSION_CONFLICT', not_committed=False))),
               ('held', (409, dict(code='RESOURCE_HELD', not_committed=True))),
               ('invalid', (422, dict(code='INVALID_INPUT', not_committed=True))),
-              ('forbidden', (403, dict(code='FORBIDDEN', not_committed=True)))]
+              ('forbidden', (403, dict(code='FORBIDDEN', not_committed=True))),
+              ('status-only', (422, dict(code='VERSION_CONFLICT', not_committed=True)))]
 
 
 class PoolAssetsTests(unittest.TestCase):
@@ -60,6 +62,14 @@ class PoolAssetsTests(unittest.TestCase):
         html = (STATIC / 'onboarding-pools.html').read_text()
         self.assertIn('method="post"', html)
         self.assertNotIn('onclick=', html)
+
+    def test_session_token_is_read_once_and_only_cleared_afterwards(self):
+        # Releasing a pending request on the server's proof relies on the page never switching
+        # sessions: csrf comes once from /api/auth/session and is only ever cleared afterwards.
+        # A refresh would let another operator's proof release this operator's pending request.
+        for name, source in (('onboarding-pools.js', 'session.csrf_token'), ('onboarding.js', 'data.csrf_token')):
+            values = re.findall(r'\bcsrf\s*=(?!=)\s*([^;,\n]+)', (STATIC / name).read_text())
+            self.assertEqual(sorted(value.strip() for value in values), sorted(["''", "''", source]), name)
 
 
 class PoolDomTests(unittest.TestCase):
@@ -86,11 +96,29 @@ class PoolDomTests(unittest.TestCase):
         self.permissions = PERMS[:]
         self.dialogs = []
         self.dialog_decide = lambda text: True
-        self.page.route('**/*', self.route)
-        self.page.on('dialog', self.dialog)
+        self.harness_errors = []
+        self.page.route('**/*', self.guarded(self.route))
+        self.page.on('dialog', self.guarded(self.dialog))
 
     def tearDown(self):
         self.context.close()
+
+    def guarded(self, callback):
+        """Record exceptions from harness callbacks: a hang they cause is a harness error, not a caught defect."""
+        def run(value):  # one parameter: Playwright passes as many arguments as the handler declares
+            try:
+                return callback(value)
+            except Exception as exc:
+                self.harness_errors.append('%s: %r' % (callback.__name__, exc))
+                raise
+        return run
+
+    def timed_out(self, what, selector='#message'):
+        """A page that never reaches the expected state is a failed expectation, unless the harness broke."""
+        if self.harness_errors:
+            raise RuntimeError('harness callback failed: ' + '; '.join(self.harness_errors))
+        shown = self.page.evaluate("s => document.querySelector(s)?.textContent ?? ''", selector)
+        self.fail(what + '; shown: ' + shown[:200])
 
     def dialog(self, dialog):
         self.dialogs.append(dialog.message)
@@ -165,17 +193,25 @@ class PoolDomTests(unittest.TestCase):
 
     def settle(self, text=None, selector='#message'):
         """Wait until the page left aria-busy and, optionally, shows the outcome text."""
-        self.page.wait_for_function(
-            "([text, selector]) => document.querySelector('#main').getAttribute('aria-busy') !== 'true'"
-            " && (!text || document.querySelector(selector).textContent.includes(text))", arg=[text, selector])
+        from playwright.sync_api import TimeoutError as PageTimeout
+        try:
+            self.page.wait_for_function(
+                "([text, selector]) => document.querySelector('#main').getAttribute('aria-busy') !== 'true'"
+                " && (!text || document.querySelector(selector).textContent.includes(text))", arg=[text, selector])
+        except PageTimeout:
+            self.timed_out('page never settled' + (' on ' + repr(text) if text else ''), selector)
 
     def act(self, trigger, method, path, text=None, selector='#message'):
         """Issue exactly the named request, then wait for its handler to finish; returns the body."""
         if isinstance(trigger, str):
             target = trigger
             trigger = lambda: self.page.locator(target).click()
-        with self.page.expect_request(lambda request: request.method == method and urlsplit(request.url).path == path) as info:
-            trigger()
+        from playwright.sync_api import TimeoutError as PageTimeout
+        try:
+            with self.page.expect_request(lambda request: request.method == method and urlsplit(request.url).path == path) as info:
+                trigger()
+        except PageTimeout:
+            self.timed_out('%s %s was never issued' % (method, path), selector)
         self.settle(text, selector)
         return info.value.post_data_json
 
@@ -479,8 +515,8 @@ class PoolDomTests(unittest.TestCase):
         self.start()
         email = MAILBOX['email']
         for selector in ('[data-mailbox-select]','[data-mailbox-group]','[data-save-group]','button[data-mailbox-write]:not([data-save-group])'):
-            self.assertIn(email, self.page.locator(selector).get_attribute('aria-label'), selector)
-        self.assertIn(TID, self.page.locator('[data-open-task]').get_attribute('aria-label'))
+            self.assertIn(email, self.page.locator(selector).get_attribute('aria-label') or '', selector)
+        self.assertIn(TID, self.page.locator('[data-open-task]').get_attribute('aria-label') or '')
 
     def test_pagehide_during_session_check_stops_initial_reads(self):
         held = []
@@ -1178,3 +1214,76 @@ class PoolDomTests(unittest.TestCase):
                     self.assertTrue(self.page.locator('#login-link').is_visible())
                 else:
                     self.assertTrue(self.page.locator('#reconcile-command').is_visible())
+
+    def test_server_proof_release_invalidates_task_config_and_rows(self):
+        self.overrides[('POST','/api/onboarding/batches')] = (503,dict(code='COMMIT_UNKNOWN'))
+        self.start()
+        self.act('[data-open-task]','GET','/api/onboarding/tasks/' + TID)
+        self.assertTrue(self.page.locator('#pause-task').is_enabled())
+        self.assertTrue(self.page.locator('#save-config').is_enabled())
+        self.act('#preflight','POST','/api/onboarding/preflight')
+        self.act('#confirm-batch','POST','/api/onboarding/batches',text='COMMIT_UNKNOWN')
+        self.overrides[('POST','/api/onboarding/batches')] = PROVED
+        self.act('#reconcile-request','POST','/api/onboarding/batches',text='已解除')
+        # The batch submission already consumed the preflight; see the import test for a live one.
+        for selector in ('#pause-task','#save-config','[data-save-group]'):
+            self.assertTrue(self.page.locator(selector).first.is_disabled(), selector + ' must need a fresh read after the release')
+        self.assertTrue(self.page.locator('#preflight').is_enabled())
+
+    def test_import_rejected_reconcile_keeps_pending(self):
+        for name, rejection in REPLAY_REJECTIONS:
+            with self.subTest(rejection=name):
+                self.overrides.clear(); self.requests.clear(); self.dialogs.clear()
+                first = self.unknown_import()
+                self.overrides[('POST','/api/onboarding/mailboxes/import')] = rejection
+                replay = self.act('#confirm-import','POST','/api/onboarding/mailboxes/import')
+                self.assertEqual(replay,first,'reconcile must replay the original key and body')
+                self.assertFalse(any('解除' in text for text in self.dialogs),'no rejection may offer a release')
+                self.assertIn('仍待核对',self.page.locator('#message').inner_text())
+                self.assertTrue(self.page.locator('#reconcile-card').is_visible())
+                self.assertIn(first['request_key'],self.page.locator('#reconcile-note').inner_text())
+
+    def test_legacy_invalid_task_read_is_reported_as_invalid_not_success(self):
+        for name, value in (('unsafe-version', {**TASK,'version':2**53 + 2}), ('null', None), ('no-id', {**TASK,'id':None})):
+            with self.subTest(response=name):
+                self.overrides.clear(); self.requests.clear(); self.dialogs.clear()
+                self.overrides[('GET','/api/onboarding/tasks/' + TID)] = (200,value)
+                self.start('/onboarding'); self.page.locator('#task-id').fill(TID)
+                self.act('#query','GET','/api/onboarding/tasks/' + TID)
+                text = self.page.locator('#message').inner_text()
+                self.assertNotIn('已取得最新', text)
+                self.assertIn('无效', text)
+                self.assertTrue(self.page.locator('#pause').is_disabled())
+
+    def test_legacy_accepted_command_with_invalid_task_stays_accepted(self):
+        path = '/api/onboarding/tasks/' + TID + '/pause'
+        accepted = dict(accepted=True,synthetic=True,execution_scope='pool',receipt_id=MID,phase='SUCCEEDED')
+        for name, response, followup in (
+                ('snapshot', {**accepted,'task':{**TASK,'version':2**53 + 2},'snapshot_pending':False}, None),
+                ('followup', {**accepted,'task':None,'snapshot_pending':True}, (200,{**TASK,'version':2**53 + 2}))):
+            with self.subTest(source=name):
+                self.overrides.clear(); self.requests.clear(); self.dialogs.clear()
+                self.start('/onboarding'); self.page.locator('#task-id').fill(TID)
+                self.act('#query','GET','/api/onboarding/tasks/' + TID,text='已取得最新')
+                self.overrides[('POST',path)] = (202,response)
+                if followup:
+                    self.overrides[('GET','/api/onboarding/tasks/' + TID)] = followup
+                self.act('#pause','POST',path)
+                text = self.page.locator('#message').inner_text()
+                self.assertIn('已受理', text)
+                self.assertIn('无效', text)
+                self.assertNotIn('未确认', text)
+                self.assertTrue(self.page.locator('#reconcile-command').is_hidden())
+                self.assertTrue(self.page.locator('#pause').is_disabled())
+
+    def test_import_release_invalidates_an_earlier_preflight(self):
+        self.overrides[('POST','/api/onboarding/mailboxes/import')] = (503,dict(code='COMMIT_UNKNOWN'))
+        self.start()
+        self.act('#preflight','POST','/api/onboarding/preflight')
+        self.assertTrue(self.page.locator('#confirm-batch').is_enabled())
+        self.import_preview()
+        self.act('#confirm-import','POST','/api/onboarding/mailboxes/import',text='COMMIT_UNKNOWN')
+        self.overrides[('POST','/api/onboarding/mailboxes/import')] = PROVED
+        self.import_preview()
+        self.act('#confirm-import','POST','/api/onboarding/mailboxes/import',text='已解除')
+        self.assertTrue(self.page.locator('#confirm-batch').is_disabled(), 'a preflight observed before the release must not survive it')
