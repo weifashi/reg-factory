@@ -42,6 +42,10 @@ REPLAY_REJECTIONS = [(code, (409, dict(code=code))) for code in ('VERSION_CONFLI
 REPLAY_REJECTIONS += [('INVALID_INPUT', (422, dict(code='INVALID_INPUT'))), ('409-no-code', (409, {})), ('422-no-code', (422, {})),
                       ('429', (429, dict(code='RATE_LIMITED'))), ('403', (403, dict(code='FORBIDDEN')))]
 PROVED = (409, dict(code='VERSION_CONFLICT', not_committed=True))
+# Failure texts of the harness waits; the frontend mutation check imports TIMEOUT_MARKERS to mark
+# catches that rest only on a wait running out.
+SETTLE_TIMEOUT, REQUEST_TIMEOUT, CONDITION_TIMEOUT = 'page never settled', 'was never issued', 'condition never held'
+TIMEOUT_MARKERS = (SETTLE_TIMEOUT, REQUEST_TIMEOUT, CONDITION_TIMEOUT)
 NOT_PROOFS = [('string', (409, dict(code='VERSION_CONFLICT', not_committed='true'))),
               ('one', (409, dict(code='VERSION_CONFLICT', not_committed=1))),
               ('null', (409, dict(code='VERSION_CONFLICT', not_committed=None))),
@@ -199,7 +203,7 @@ class PoolDomTests(unittest.TestCase):
                 "([text, selector]) => document.querySelector('#main').getAttribute('aria-busy') !== 'true'"
                 " && (!text || document.querySelector(selector).textContent.includes(text))", arg=[text, selector])
         except PageTimeout:
-            self.timed_out('page never settled' + (' on ' + repr(text) if text else ''), selector)
+            self.timed_out(SETTLE_TIMEOUT + (' on ' + repr(text) if text else ''), selector)
 
     def act(self, trigger, method, path, text=None, selector='#message'):
         """Issue exactly the named request, then wait for its handler to finish; returns the body."""
@@ -211,7 +215,7 @@ class PoolDomTests(unittest.TestCase):
             with self.page.expect_request(lambda request: request.method == method and urlsplit(request.url).path == path) as info:
                 trigger()
         except PageTimeout:
-            self.timed_out('%s %s was never issued' % (method, path), selector)
+            self.timed_out('%s %s %s' % (method, path, REQUEST_TIMEOUT), selector)
         self.settle(text, selector)
         return info.value.post_data_json
 
@@ -220,7 +224,7 @@ class PoolDomTests(unittest.TestCase):
             if predicate():
                 return
             self.page.wait_for_timeout(20)
-        self.timed_out('condition never held: ' + reason)
+        self.timed_out(CONDITION_TIMEOUT + ': ' + reason)
 
     def assert_quiet(self, method, path, count, window=300):
         """Bounded observation after settling: no further request of this kind appears."""

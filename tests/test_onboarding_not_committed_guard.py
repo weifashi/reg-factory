@@ -1,6 +1,8 @@
 """Offline guards for the not-committed proof: where it may be raised, and the invariants it relies on."""
 import ast
+import hashlib
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -24,12 +26,33 @@ IMMUTABLE = {'mailbox_registry': {'email_norm', 'owner_operator_id', 'source_fin
              'operation_receipts': {'scope_operator_id', 'action', 'task_id', 'idempotency_key', 'request_hash'},
              'global_configs': set()}
 BUMP_COLUMNS = {'status', 'reason_code', 'current_step', 'generation', 'cancel_requested'}
+# Reviewed bump_task, as canonical(): the same digest on every Python the project supports (3.10+).
+BUMP_TASK_AST_SHA256 = 'ae2097248b0206a2dadf722b2e97262bfdbcb7417524a9886d3e59fd17cfece4'
 BUMP_SQL = {'{}=%s', 'version=version+1', 'updated_at=clock_timestamp()', ',',
             'UPDATE onboarding_tasks SET {} WHERE id=%s AND version=%s RETURNING id'}
 
 
+def changes_read(node, parents):
+    """The only reviewed reads of `changes`: set(changes), changes.items(), changes.values(), for key in changes."""
+    parent = parents.get(node)
+    if not isinstance(node.ctx, ast.Load):
+        return False
+    if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) and parent.func.id == 'set' \
+            and len(parent.args) == 1 and parent.args[0] is node and not parent.keywords:
+        return True
+    if isinstance(parent, ast.Attribute) and parent.attr in ('items', 'values'):
+        call = parents.get(parent)
+        return isinstance(call, ast.Call) and call.func is parent and not call.args and not call.keywords
+    return isinstance(parent, ast.comprehension) and parent.iter is node \
+        and isinstance(parent.target, ast.Name) and parent.target.id == 'key'
+
+
 def bump_sql_problems(function):
-    """bump_task may compose only its reviewed fragments; its one identifier is the whitelisted loop key."""
+    """bump_task may compose only its reviewed fragments; its one identifier is the whitelisted loop key.
+
+    An allowlist, not a blocklist: `changes` may only be read in the reviewed forms, SQL and Identifier may
+    only be called, and nested scopes or getattr (which can shadow or alias names) are refused outright.
+    """
     found, parents = [], {}
     for node in ast.walk(function):
         for child in ast.iter_child_nodes(node):
@@ -40,22 +63,20 @@ def bump_sql_problems(function):
             or (isinstance(node.func, ast.Name) and node.func.id == name))
     identifiers = []
     for node in ast.walk(function):
+        if node is not function and isinstance(node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found.append('nested scope in bump_task: ' + type(node).__name__)
+        name = node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
+        if name == 'getattr':
+            found.append('getattr in bump_task')
+        if name in ('SQL', 'Identifier') and not (isinstance(parents.get(node), ast.Call) and parents[node].func is node):
+            found.append('%s referenced without being called in bump_task' % name)
         if called(node, 'SQL') and not (len(node.args) == 1 and isinstance(node.args[0], ast.Constant)
                                         and node.args[0].value in BUMP_SQL):
             found.append('unreviewed SQL fragment in bump_task: ' + ast.unparse(node))
         if called(node, 'Identifier'):
             identifiers.append(node)
-        # The whitelist check covers `changes` only if nothing rewrites it afterwards.
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target] \
-            if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else node.targets if isinstance(node, ast.Delete) else []
-        for target in targets:
-            if (isinstance(target, ast.Name) and target.id == 'changes') or \
-                    (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id == 'changes'):
-                found.append('bump_task rewrites changes: ' + ast.unparse(node).splitlines()[0])
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) \
-                and node.func.value.id == 'changes' and node.func.attr in ('update', 'setdefault', 'pop', 'popitem',
-                                                                           'clear', '__setitem__', '__delitem__'):
-            found.append('bump_task rewrites changes: ' + ast.unparse(node))
+        if isinstance(node, ast.Name) and node.id == 'changes' and not changes_read(node, parents):
+            found.append('changes used outside its reviewed reads: ' + ast.unparse(parents.get(node, node)).splitlines()[0])
     for node in identifiers:
         comprehension = parents.get(node)
         while comprehension is not None and not isinstance(comprehension, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
@@ -68,6 +89,16 @@ def bump_sql_problems(function):
     if len(identifiers) > 1:
         found.append('bump_task builds %d identifiers (expected one)' % len(identifiers))
     return found
+
+
+def canonical(node):
+    """ast.dump without positions or empty fields, which Python versions render differently (3.10-3.14 agree)."""
+    if isinstance(node, ast.AST):
+        return '%s(%s)' % (type(node).__name__, ', '.join(
+            '%s=%s' % (name, canonical(value)) for name, value in ast.iter_fields(node) if value not in (None, [])))
+    if isinstance(node, list):
+        return '[%s]' % ', '.join(canonical(item) for item in node)
+    return repr(node)
 
 
 def bump_definitions(tree):
@@ -211,13 +242,16 @@ def caller_violations(source, module):
 
 # A table as written in SQL: optional ONLY, optional (quoted) schema, (quoted) name.
 TABLE = r'(?:ONLY\s+)?(?:"?\w+"?\s*\.\s*)?"?(\w+)"?'
-UPDATE_HEAD = re.compile(r'\bUPDATE\s+' + TABLE + r'(?:\s*\*)?(?:\s+(?:AS\s+)?(?!SET\b)"?(\w+)"?)?\s+SET\b', re.I)
+UPDATE_HEAD = re.compile(r'\bUPDATE\s+' + TABLE + r'(?:\s*\*)?'
+                         r'(?:\s+AS\s+"?(\w+)"?|\s+(?!(?:SET|AS)\b)"?(\w+)"?)?\s+SET\b', re.I)
+# The table a write verb names: optional ONLY and parenthesis, no required space, up to two qualifiers.
+TARGET = r'\s*(?:ONLY\b\s*\(?\s*)?(?:"?\w+"?\s*\.\s*){0,2}"?(\w+)"?'
 # Any UPDATE of a table; a protected one that UPDATE_HEAD cannot parse is reported, never skipped.
-UPDATE_ANY = re.compile(r'\bUPDATE\s+' + TABLE, re.I)
+UPDATE_ANY = re.compile(r'\bUPDATE\b' + TARGET, re.I)
 UPSERT_HEAD = re.compile(r'\bINSERT\s+INTO\s+' + TABLE + r'[^;]*?\bON\s+CONFLICT\b[^;]*?\bDO\s+UPDATE\s+SET\b',
                          re.I | re.S)
-DELETE_FROM = re.compile(r'\bDELETE\s+FROM\s+' + TABLE, re.I)
-MERGE_INTO = re.compile(r'\bMERGE\s+INTO\s+' + TABLE, re.I)
+DELETE_FROM = re.compile(r'\bDELETE\s+FROM\b' + TARGET, re.I)
+MERGE_INTO = re.compile(r'\bMERGE\s+INTO\b' + TARGET, re.I)
 TRUNCATE = re.compile(r'\bTRUNCATE\b([^;]*)', re.I)
 DROP_TABLE = re.compile(r'\bDROP\s+TABLE\b([^;]*)', re.I)
 ALTER_TABLE = re.compile(r'\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?' + TABLE + r'([^;]*)', re.I | re.S)
@@ -294,24 +328,36 @@ def scan(text, start=0):
 
 
 def strip_comments(text):
-    """Drop -- and /* */ comments outside quoted strings and identifiers; '--' inside a literal stays.
+    """Drop -- and (nested) /* */ comments outside quoted strings and identifiers.
 
-    Dollar-quoted bodies are function code, so comments inside them are dropped as well.
+    A dollar-quoted body keeps its tags and is stripped on its own, so a comment marker inside a
+    dollar-quoted value never reaches past the closing tag, while plpgsql bodies lose their comments.
+    A tag that never closes is ordinary text (a$x$ is one identifier to PostgreSQL); scan() still
+    reports it as unparseable.
     """
     kept, index = [], 0
     while index < len(text):
         char = text[index]
+        dollar = re.match(r'\$(\w*)\$', text[index:])
+        close = text.find(dollar.group(0), index + len(dollar.group(0))) if dollar else -1
         if char in "'\"":
             end = quote_end(text, index)
             end = len(text) - 1 if end is None else end
             kept.append(text[index:end + 1]); index = end + 1
+        elif close >= 0:
+            tag = dollar.group(0)
+            kept.append(tag + strip_comments(text[index + len(tag):close]) + tag)
+            index = close + len(tag)
         elif text.startswith('--', index):
             close = text.find('\n', index)
             index = len(text) if close < 0 else close
             kept.append(' ')
         elif text.startswith('/*', index):
-            close = text.find('*/', index + 2)
-            index = len(text) if close < 0 else close + 2
+            depth, index = 1, index + 2
+            while index < len(text) and depth:
+                step = 2 if text.startswith(('/*', '*/'), index) else 1
+                depth += text.startswith('/*', index) - text.startswith('*/', index)
+                index += step
             kept.append(' ')
         else:
             kept.append(char); index += 1
@@ -351,6 +397,9 @@ def assignments(clause):
                     and part[index + 1:index + 2] != '=':
                 target, part = part[:index].strip(), part[index + 1:]
                 break
+        # An unquoted target with a space (e.g. `set email_norm` after `AS set`) is not a column.
+        if target and not target.startswith(('(', '"')) and re.search(r'\s', target):
+            return None
         pairs.append((target, part.strip()))
     return pairs
 
@@ -460,7 +509,7 @@ def sql_violations(source, module):
             for match in pattern.finditer(text):
                 table = match.group(1).lower()
                 if table in IMMUTABLE:
-                    alias = match.group(2) if verb == 'UPDATE' else None
+                    alias = (match.group(2) or match.group(3)) if verb == 'UPDATE' else None
                     found += assignment_violations(verb, table, set_clause(text, match.end()), module,
                                                    whitelisted_list=(module, function) == BUMP_TASK, alias=alias)
         for verb, pattern in (('DELETE FROM', DELETE_FROM), ('MERGE INTO', MERGE_INTO)):
@@ -541,11 +590,26 @@ class NotCommittedGuardTests(unittest.TestCase):
                                                   "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
                             ('rebound-changes', "    changes = dict(changes, execution_scope='pool')\n"
                                                 "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
-                            ('literal-keys', "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in ('execution_scope',)]\n")):
+                            ('literal-keys', "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in ('execution_scope',)]\n"),
+                            ('tuple-unpacking', "    changes, _ = dict(changes, execution_scope='pool'), None\n" + "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
+                            ('walrus', "    if (changes := dict(changes, execution_scope='pool')):\n        pass\n" + "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
+                            ('for-target', "    for changes in [dict(changes, execution_scope='pool')]:\n        pass\n" + "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
+                            ('dict-update-call', "    dict.update(changes, execution_scope='pool')\n" + "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
+                            ('sql-alias', "    S = sql.SQL\n    assignments = [S('execution_scope=%s')]\n"),
+                            ('lambda-shadow', "    assignments = [(lambda key: sql.SQL('{}=%s').format(sql.Identifier(key)))('execution_scope') for key in changes]\n"),
+                            ('update-method', "    changes.update(execution_scope='pool')\n" + "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
+                            ('del-item', "    del changes['status']\n" + "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
+                            ('two-comprehensions', "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n" + "    assignments = [sql.SQL('{}=%s').format(sql.Identifier(key)) for key in changes]\n"),
+                            ('getattr', "    assignments = [getattr(sql, 'SQL')('execution_scope=%s')]\n"),
+                            ('identifier-alias', "    I = sql.Identifier\n    assignments = [sql.SQL('{}=%s').format(I('execution_scope'))]\n")):
             with self.subTest(smuggled=name):
                 source = 'def bump_task(conn, task, **changes):\n    assignments = []\n' + extra
                 self.assertTrue(bump_sql_problems(ast.parse(source).body[0]))
         self.assertEqual(bump_definitions(tree), 1)
+        digest = hashlib.sha256(canonical(bump).encode()).hexdigest()
+        self.assertEqual(digest, BUMP_TASK_AST_SHA256,
+                         'bump_task differs from the reviewed one (canonical AST under Python %d.%d): re-review its '
+                         'SQL composition, then update BUMP_TASK_AST_SHA256' % sys.version_info[:2])
         twice = 'def bump_task(conn, task, **changes):\n    pass\n\n\ndef bump_task(conn, task, **changes):\n    pass\n'
         self.assertEqual(bump_definitions(ast.parse(twice)), 2)
 
@@ -663,6 +727,9 @@ class NotCommittedGuardTests(unittest.TestCase):
             'drop-column-implicit': 'ALTER TABLE mailbox_registry DROP source_fingerprint;\n',
             'into-second-target': 'CREATE FUNCTION f() RETURNS trigger AS $$ BEGIN SELECT 1, 2 INTO NEW.status, NEW.version; '
                                   'RETURN NEW; END $$ LANGUAGE plpgsql;\n',
+            # a$x$ is one identifier to PostgreSQL, so the comments after it are still comments.
+            'identifier-dollar-then-comment': 'CREATE TABLE a$x$ (id int);\nCREATE FUNCTION f() RETURNS trigger AS $$ BEGIN\n'
+                                              '  -- keep it\n  NEW.version := 1; RETURN NEW; END $$ LANGUAGE plpgsql;\n',
         }
         for name, source in bad_migrations.items():
             with self.subTest(migration=name):
@@ -694,6 +761,11 @@ class NotCommittedGuardTests(unittest.TestCase):
             'alias-version': "Q = 'UPDATE onboarding_tasks t SET version=t.version+1 WHERE t.id=%s'\n",
             'table-version': "Q = 'UPDATE onboarding_tasks SET version=onboarding_tasks.version+1 WHERE id=%s'\n",
             'quoted-alias-version': 'Q = \'UPDATE onboarding_tasks "t" SET version="t".version+1 WHERE "t".id=%s\'\n',
+            'e-string-version': 'Q = "UPDATE mailbox_registry SET group_ref=E\'\\\\\'\', version=version+1 WHERE id=%s"\n',
+            'dash-literal-version': 'Q = "UPDATE mailbox_registry SET group_ref=\'--\', version=version+1 WHERE id=%s"\n',
+            'star-version': "Q = 'UPDATE onboarding_tasks * SET version=version+1 WHERE id=%s'\n",
+            'as-set-alias-version': "Q = 'UPDATE onboarding_tasks AS set SET version=set.version+1 WHERE id=%s'\n",
+            'as-quoted-alias-version': 'Q = \'UPDATE onboarding_tasks AS "t" SET version="t".version+1 WHERE "t".id=%s\'\n',
         }
         must_flag = {
             'excluded-version': "Q = 'INSERT INTO onboarding_tasks(id) VALUES(%s) ON CONFLICT (id) DO UPDATE SET version=EXCLUDED.version+1'\n",
@@ -709,6 +781,19 @@ class NotCommittedGuardTests(unittest.TestCase):
             'as-quoted-alias': 'Q = \'UPDATE mailbox_registry AS "m" SET email_norm=%s WHERE "m".id=%s\'\n',
             'star-head': "Q = 'UPDATE mailbox_registry * SET email_norm=%s WHERE id=%s'\n",
             'unrecognized-head': "Q = 'UPDATE mailbox_registry m WITH x SET email_norm=%s'\n",
+            'dollar-value-comment': 'Q = "UPDATE mailbox_registry SET group_ref=$$/*$$, email_norm=%s WHERE id=%s AND $$*/$$<>\'\'"\n',
+            'dollar-value-line-comment': 'Q = "UPDATE mailbox_registry SET group_ref=$$--$$, email_norm=%s WHERE id=%s AND $$\\n$$<>\'\'"\n',
+            'nested-block-comment': 'Q = "UPDATE mailbox_registry SET group_ref=%s /* /* */ \' */, email_norm=%s -- \'\\n WHERE id=%s"\n',
+            'as-set-alias': "Q = 'UPDATE mailbox_registry AS set SET email_norm=%s WHERE id=%s'\n",
+            'only-parenthesized': "Q = 'UPDATE ONLY (mailbox_registry) SET email_norm=%s WHERE id=%s'\n",
+            'no-space-quoted': 'Q = \'UPDATE"mailbox_registry" SET email_norm=%s WHERE id=%s\'\n',
+            'three-part-name': "Q = 'UPDATE regdb.rf.mailbox_registry SET email_norm=%s WHERE id=%s'\n",
+            'delete-three-part': "Q = 'DELETE FROM regdb.rf.operation_receipts WHERE id=%s'\n",
+            'merge-three-part': "Q = 'MERGE INTO regdb.rf.global_configs g USING x ON true WHEN MATCHED THEN DELETE'\n",
+            'unterminated-dollar': "Q = 'UPDATE mailbox_registry SET group_ref=$x$abc, email_norm=%s WHERE id=%s'\n",
+            'unclosed-tag-then-delete': "Q = 'WITH a$x$ AS (SELECT 1) DELETE /**/ FROM operation_receipts WHERE id=%s'\n",
+            'unclosed-tag-then-update': "Q = 'WITH a$x$ AS (SELECT 1) UPDATE /**/ mailbox_registry SET email_norm=%s WHERE id=%s'\n",
+            'set-target-with-space': "Q = 'UPDATE mailbox_registry set SET email_norm=%s WHERE id=%s'\n",
         }
         for name, source in must_flag.items():
             with self.subTest(pattern=name):
