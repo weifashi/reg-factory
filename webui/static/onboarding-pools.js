@@ -133,8 +133,9 @@
     return true;
   }
   // Retain only nonsecret request bodies on uncertain mutation outcomes. Never retry implicitly.
-  // No rejection of a replay releases it: pre-receipt environment checks (migration catalog,
-  // database target) also answer 409/422, so no status proves the original never committed.
+  // A rejected replay stays pending unless releaseProven accepts the server's not-committed proof
+  // for this very request and the operator confirms: pre-receipt environment checks (migration
+  // catalog, database target) also answer 409/422, so no status alone proves anything.
   async function mutate(path, method, body, permission, accepted) {
     try {
       const result = await api(path,method,body); forget(); await accepted(result);
@@ -414,6 +415,8 @@
       const session = await api('/api/auth/session');
       if (inactive) return; // Hidden before the session answered: never re-enable this page.
       if (!session || typeof session.csrf_token !== 'string' || !Array.isArray(session.permissions)) throw invalid();
+      // Read once per page and only cleared afterwards: releaseProven relies on this page never
+      // switching sessions (another operator's proof must not release this operator's request).
       csrf = session.csrf_token; permissions = new Set(session.permissions); $('#operator').textContent = session.display_name;
       if (has('onboarding:read')) {
         try { await loadMailboxes(); } catch (error) { fail(error); }

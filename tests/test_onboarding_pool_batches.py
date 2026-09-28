@@ -914,13 +914,24 @@ class PoolBatchEntryTests(onboarding_pool_support.PoolCase):
         finally:
             self.set_migration_checksum(checksum)
 
+    def test_no_proof_when_no_pool_config_exists(self):
+        # Spec §4 position 1: a missing config is an environment anomaly, never a proof.
+        seed = self.seed()
+        ghost = {'revision': 'pool-' + str(uuid4())}
+        before = self.business_snapshot()
+        self.assertFalse(self.proof(lambda: self.create(ghost, [seed], 'fixture:ghost')))
+        self.assertEqual(before, self.business_snapshot())
+
     def test_no_proof_when_migration_commits_before_tail_checks(self):
         stale, seed = self.config(), self.seed()
         self.config()
         checksum = self.read('SELECT checksum FROM schema_migrations WHERE version=2')[0][0]
-        fired = []
+        fired, seen = [], []
         def hook(cursor, text):
-            if not fired and 'idempotency_key' in text:
+            # Spec 7.g: the drift commits after the proof reads (receipt, then the current config).
+            if 'idempotency_key' in text:
+                seen.append(True)
+            elif seen and not fired and 'ORDER BY created_at DESC' in text:
                 fired.append(True)
                 self.set_migration_checksum('0' * 64)
         try:

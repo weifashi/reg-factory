@@ -31,12 +31,12 @@ class RunnerTests(unittest.TestCase):
         from tools.onboarding_test_runner import selected_modules
         self.assertEqual(set(selected_modules('offline')), {
             'test_onboarding_dependencies', 'test_onboarding_migration_catalog',
-            'test_onboarding_mailbox_parser', 'test_onboarding_pool_secret_types',
+            'test_onboarding_mailbox_parser', 'test_onboarding_card_import', 'test_onboarding_pool_secret_types',
             'test_onboarding_request_mac', 'test_onboarding_mailbox_cursor',
             'test_onboarding_pool_contracts', 'test_onboarding_not_committed_guard'})
         self.assertEqual(set(selected_modules('pools')), {
             'test_onboarding_migration_sequence', 'test_onboarding_pool_schema',
-            'test_onboarding_pool_vault', 'test_onboarding_mailbox_import',
+            'test_onboarding_pool_vault', 'test_onboarding_cards', 'test_onboarding_mailbox_import',
             'test_onboarding_mailbox_import_races', 'test_onboarding_mailbox_reads',
             'test_onboarding_mailbox_update', 'test_onboarding_mailbox_update_races',
             'test_onboarding_pool_config', 'test_onboarding_pool_config_races',

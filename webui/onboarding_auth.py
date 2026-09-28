@@ -224,7 +224,8 @@ def _transport(request, config):
     from onboarding.errors import ErrorCode, ServiceError
     from urllib.parse import urlsplit
     # ASGI scheme and Host are authoritative. Forwarded headers are ignored.
-    for name in ('host', 'origin', 'content-type', 'content-length', 'x-csrf-token', 'sec-fetch-site', 'referer'):
+    for name in ('host', 'origin', 'content-type', 'content-length', 'x-csrf-token',
+                 'sec-fetch-site', 'referer', 'accept', 'sec-fetch-mode', 'sec-fetch-dest'):
         if len(request.headers.getlist(name)) > 1:
             raise ServiceError(ErrorCode.FORBIDDEN)
     if request.scope.get('scheme') != 'https':
@@ -232,15 +233,32 @@ def _transport(request, config):
     origin = request.headers.get('origin')
     security.check_request(config.expected_origin if origin is None else origin, request.headers.get('host'),
                            config.expected_origin)
-    if request.headers.get('sec-fetch-site') not in (None, 'same-origin', 'none'):
+    # External document entry may reach only static login or a fixed login redirect.
+    # Fetch metadata is not authentication; no API or business response gains access.
+    external_navigation = (
+        request.method == 'GET'
+        and request.url.path in ('/login', '/', '/onboarding', '/onboarding/pools')
+        and origin is None
+        and request.headers.get('sec-fetch-site') in ('same-site', 'cross-site')
+        and request.headers.get('sec-fetch-mode') == 'navigate'
+        and request.headers.get('sec-fetch-dest') == 'document'
+        and 'text/html' in {part.split(';', 1)[0].strip().lower()
+                            for part in request.headers.get('accept', '').split(',')}
+    )
+    if request.headers.get('sec-fetch-site') not in (None, 'same-origin', 'none') and not external_navigation:
         raise ServiceError(ErrorCode.FORBIDDEN)
     referer = request.headers.get('referer')
     if referer:
         try:
             parsed = urlsplit(referer)
+            if external_navigation and (parsed.scheme not in ('http', 'https') or not parsed.hostname
+                                        or parsed.username is not None or parsed.password is not None):
+                raise ValueError
+            if external_navigation:
+                parsed.port  # Validate malformed ports before accepting an external referer.
         except ValueError:
             raise ServiceError(ErrorCode.FORBIDDEN) from None
-        if parsed.scheme + '://' + parsed.netloc != config.expected_origin:
+        if parsed.scheme + '://' + parsed.netloc != config.expected_origin and not external_navigation:
             raise ServiceError(ErrorCode.FORBIDDEN)
     if request.method not in ('GET', 'HEAD'):
         security.check_request(origin, request.headers.get('host'), config.expected_origin,
@@ -254,6 +272,7 @@ def _transport(request, config):
                 if name in names:
                     raise ServiceError(ErrorCode.FORBIDDEN)
                 names.append(name)
+    return external_navigation
 
 
 def _authenticate_request(request, config, permission):
@@ -291,11 +310,13 @@ class ProtectionMiddleware:
             if not self.config.ready:
                 response = error_response('DEPENDENCY_UNAVAILABLE', correlation_id=correlation)
             else:
-                _transport(request, self.config)
+                external_navigation = _transport(request, self.config)
                 policy, permission = _policy(request.method, request.url.path)
                 pool_permission = _pool_permission(request.method, request.url.path)
                 if pool_permission is not None and self.config.pool_mode == 'synthetic':
                     policy, permission = 'pool', pool_permission
+                if external_navigation and request.url.path != '/login':
+                    policy = 'external_navigation'
                 if '%' in scope.get('raw_path', b'').decode('ascii', errors='replace') or '\\' in request.url.path:
                     policy = 'deny'
                 if request.url.path.startswith('/api/auth/') and request.url.query:
@@ -310,6 +331,9 @@ class ProtectionMiddleware:
                         response = error_response('RATE_LIMITED', correlation_id=correlation)
                 if policy == 'deny':
                     response = error_response('FORBIDDEN', correlation_id=correlation)
+                elif policy == 'external_navigation':
+                    from starlette.responses import RedirectResponse
+                    response = RedirectResponse('/login', status_code=303)
                 elif policy == 'pool' and not self.config.pool_ready:
                     response = error_response('DEPENDENCY_UNAVAILABLE', correlation_id=correlation)
                 elif policy != 'public':

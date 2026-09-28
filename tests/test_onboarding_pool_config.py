@@ -546,9 +546,12 @@ class PoolConfigTests(PoolCase):
         first = self.replace_config(None, key='fixture:first')
         self.replace_config(first['revision'], key='fixture:second')
         checksum = self.read('SELECT checksum FROM schema_migrations WHERE version=2')[0][0]
-        fired = []
+        fired, seen = [], []
         def hook(cursor, text):
-            if not fired and 'idempotency_key' in text:
+            # Spec 7.g: the drift commits after the proof reads (receipt, then the current config).
+            if 'idempotency_key' in text:
+                seen.append(True)
+            elif seen and not fired and 'ORDER BY created_at DESC' in text:
                 fired.append(True)
                 self.set_migration_checksum('0' * 64)
         try:

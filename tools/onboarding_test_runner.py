@@ -23,8 +23,8 @@ DB = ('domain','allocation','gates','contracts','settings','storage','migrations
 SECURITY = ('security','keyring','secrets','downloads','b2_bridge')
 WEB = ('route_guard','routes','legacy_security','lifecycle','pages','test_runner',
        'pool_api','pool_ui')
-OFFLINE = ('dependencies', 'migration_catalog', 'mailbox_parser', 'pool_secret_types', 'request_mac', 'mailbox_cursor', 'pool_contracts', 'not_committed_guard')
-POOLS = ('migration_sequence', 'pool_schema', 'pool_vault', 'mailbox_import', 'mailbox_import_races', 'mailbox_reads', 'mailbox_update', 'mailbox_update_races', 'pool_config', 'pool_config_races', 'pool_repository', 'pool_leases', 'pool_commands', 'pool_batches', 'pool_preflight', 'task_read')
+OFFLINE = ('dependencies', 'migration_catalog', 'mailbox_parser', 'card_import', 'pool_secret_types', 'request_mac', 'mailbox_cursor', 'pool_contracts', 'not_committed_guard')
+POOLS = ('migration_sequence', 'pool_schema', 'pool_vault', 'cards', 'mailbox_import', 'mailbox_import_races', 'mailbox_reads', 'mailbox_update', 'mailbox_update_races', 'pool_config', 'pool_config_races', 'pool_repository', 'pool_leases', 'pool_commands', 'pool_batches', 'pool_preflight', 'task_read')
 LEGACY = ('test_webui_env_reload','test_webui_update','test_webui_tour','test_account_records')
 
 

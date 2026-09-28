@@ -935,6 +935,15 @@ class TestCase(PoolCase):
         finally:
             self.set_migration_checksum(checksum)
 
+    def test_not_committed_proof_at_maximum_version(self):
+        # Spec C2: a task at the maximum version can never accept a command that expects it.
+        seed = self.seed()
+        with self.uow() as conn:
+            conn.execute('UPDATE onboarding_tasks SET version=%s WHERE id=%s', (2**63 - 1, seed['id']))
+        before = self.business_snapshot()
+        self.assertTrue(self.proof(lambda: self.call('pause', seed, 2**63 - 1, 'fixture:max')))
+        self.assertEqual(before, self.business_snapshot())
+
     def test_no_proof_when_migration_commits_before_tail_checks(self):
         seed = self.seed()
         self.call('pause', seed, 1, 'fixture:first')
