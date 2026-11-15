@@ -22,15 +22,18 @@ DB = ('domain','allocation','gates','contracts','settings','storage','migrations
       'test_db','repository','leases','receipts','approvals','coordinator','b1_faults','fixture')
 SECURITY = ('security','keyring','secrets','downloads','b2_bridge')
 WEB = ('route_guard','routes','legacy_security','lifecycle','pages','test_runner',
-       'pool_api','pool_ui')
-OFFLINE = ('dependencies', 'migration_catalog', 'mailbox_parser', 'pool_secret_types', 'request_mac', 'mailbox_cursor', 'pool_contracts', 'not_committed_guard')
-POOLS = ('migration_sequence', 'pool_schema', 'pool_vault', 'mailbox_import', 'mailbox_import_races', 'mailbox_reads', 'mailbox_update', 'mailbox_update_races', 'pool_config', 'pool_config_races', 'pool_repository', 'pool_leases', 'pool_commands', 'pool_batches', 'pool_preflight', 'task_read')
+       'pool_api','pool_ui','console','console_ui','unified_ui','card_api','card_runtime','card_ui','task_events','run_layout','run_ui','mailbox_table',
+       'live_boot','live_api','live_ui')
+OFFLINE = ('dependencies', 'migration_catalog', 'mailbox_parser', 'card_import', 'pool_secret_types', 'request_mac', 'mailbox_cursor', 'pool_contracts', 'not_committed_guard', 'sub2api_probe', 'sub2api_import', 'google_cloud', 'live_effects', 'google_auth_runtime', 'sub2api_target_runtime', 'async_runtime', 'executor_stop_proof', 'db_lane', 'live_input_vault', 'live_mailbox_source', 'live_config', 'live_entry', 'live_commands', 'live_observe', 'live_read', 'live_manager', 'live_runtime_v2')
+POOLS = ('migration_sequence', 'pool_schema', 'pool_vault', 'cards', 'card_management', 'mailbox_import', 'mailbox_import_races', 'mailbox_reads', 'mailbox_update', 'mailbox_update_races', 'pool_config', 'pool_config_races', 'pool_repository', 'pool_leases', 'pool_commands', 'pool_batches', 'pool_preflight', 'task_read', 'safe_cancel', 'live_effects_db', 'live_adapter_integration', 'live_runtime', 'live_key_store', 'live_run_store', 'live_executor', 'live_completion', 'executor_db_lane', 'live_input_vault_db', 'live_config_db', 'live_config_mode', 'live_entry_db', 'live_commands_db', 'live_observe_db', 'live_read_db', 'live_manager_db', 'live_mailbox_read', 'live_api_db')
+BROWSER = ('google_browser',)
 LEGACY = ('test_webui_env_reload','test_webui_update','test_webui_tour','test_account_records')
 
 
 def selected_modules(suite):
     groups = {'db': DB, 'security': SECURITY, 'web': WEB,
-              'offline': OFFLINE, 'pools': POOLS, 'all': DB + SECURITY + WEB + OFFLINE + POOLS}
+              'offline': OFFLINE, 'pools': POOLS, 'browser': BROWSER,
+              'all': DB + SECURITY + WEB + OFFLINE + POOLS + BROWSER}
     if suite not in groups:
         raise ValueError('unknown suite')
     return ['test_onboarding_' + name for name in groups[suite]]
@@ -126,7 +129,7 @@ def _names(suite):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=('db','security','web','offline','pools','all'), required=True)
+    parser.add_argument('--suite', choices=('db','security','web','offline','pools','browser','all'), required=True)
     parser.add_argument('--require-no-skips', action='store_true', help='Always enforced; explicit for audit')
     parser.add_argument('--legacy', action='store_true', help='Also run four named old regression modules')
     parser.add_argument('--json-result', type=Path)

@@ -23,6 +23,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from common.managed_mailboxes import MailboxBoundaryError, mailbox_source_root, management_lock
+
 ROOT = Path(__file__).resolve().parents[1]
 _shared_data_root = Path(os.environ.get("REG_FACTORY_DATA_DIR") or ROOT).resolve()
 DATA_ROOT = Path(
@@ -155,14 +157,29 @@ def _configure_shared_email_pool() -> None:
 
 
 def _shared_email_records() -> list[dict[str, Any]]:
-    if not MAIN_EMAILS_PATH.is_file():
-        return []
-    try:
-        text = MAIN_EMAILS_PATH.read_text(encoding="utf-8-sig")
-    except OSError:
-        return []
-    records, _errors = _normalize_records(text)
+    records, _errors = _shared_email_records_with_errors()
     return records
+
+
+def _shared_email_records_with_errors() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Deliver main-pool copies only after durable ownership exclusion."""
+    source = Path(os.path.realpath(MAIN_EMAILS_PATH))
+    with management_lock(mailbox_source_root(source)) as boundary:
+        if not source.is_file():
+            return [], []
+        try:
+            text = source.read_text(encoding="utf-8-sig")
+        except OSError:
+            return [], []
+        records, errors = _normalize_records(text)
+        available = []
+        for record in records:
+            if boundary.is_managed(record["email"]):
+                continue
+            boundary.record_legacy_use(record["email"])
+            record["pool_source"] = "main"
+            available.append(record)
+        return available, errors
 
 
 def _refresh_shared_email_pool() -> int:
@@ -196,20 +213,68 @@ def _refresh_shared_email_pool() -> int:
     return added
 
 
+def _record_shared_email_use(boundary, record: dict[str, Any]) -> None:
+    """Bind the actual child input and any declared alias credential parents."""
+    from common.account_records import parse_account_text
+
+    pending, seen = [record], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        email = current.get("email")
+        raw = str(current.get("raw") or "").strip()
+        if raw:
+            parsed, errors = parse_account_text(raw, plus_credentials=True)
+            if (errors or len(parsed) != 1 or not isinstance(email, str)
+                    or str(parsed[0].get("email") or "").strip().lower() != email.strip().lower()):
+                raise MailboxBoundaryError()
+        boundary.record_legacy_use(email)
+        parent = current.get("parent_email")
+        if parent:
+            boundary.record_legacy_use(parent)
+            pending.extend(item for item in EMAILS.values()
+                           if str(item.get("email") or "").strip().lower() == parent.strip().lower())
+
+
+def _deliver_shared_email_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Durable preflight before any copy, response or child-input disclosure."""
+    if not records:
+        return records
+    with management_lock(mailbox_source_root(MAIN_EMAILS_PATH)) as boundary:
+        for record in records:
+            _record_shared_email_use(boundary, record)
+    return records
+
+
+def _reserve_shared_emails(records: list[dict[str, Any]]) -> None:
+    # Complete all ownership checks/markers before any old reservation journal.
+    # A failed batch may retain conservative markers, never invisible tasks.
+    _deliver_shared_email_records(records)
+    for record in records:
+        _reserve_shared_email(record)
+
+
 def _reserve_shared_email(record: dict[str, Any]) -> None:
     """Reserve a K12 mailbox using the project's cross-process allocator."""
-    if record.get("shared_reserved"):
-        return
-    try:
-        _configure_shared_email_pool()
-        from common import emails as pool
+    with management_lock(mailbox_source_root(MAIN_EMAILS_PATH)) as boundary:
+        # Old K12 copies can lack pool_source or carry a stale reserved flag.
+        # Neither is proof that the current managed owner permits consumption.
+        _record_shared_email_use(boundary, record)
+        if record.get("pool_source") != "main" or record.get("shared_reserved"):
+            return
+        try:
+            _configure_shared_email_pool()
+            from common import emails as pool
 
-        pool.mark_registration_started("k12", record.get("email"), record.get("password") or "")
-        record["shared_reserved"] = True
-    except Exception:
-        # K12 remains usable with a private imported record if the shared file
-        # is unavailable; normal main-pool imports still use the allocator.
-        pass
+            pool.mark_registration_started("k12", record.get("email"), record.get("password") or "")
+            record["shared_reserved"] = True
+        except MailboxBoundaryError:
+            raise
+        except Exception:
+            # Preserve the old journal-error tolerance, never ownership errors.
+            pass
 
 
 def _mark_shared_result(record: dict[str, Any], success: bool, reason: str = "") -> None:
@@ -339,6 +404,16 @@ async def _run_task_limited(task_id: str, record_id: str) -> None:
     if task.get("status") == "canceled":
         if record.get("status") in {"queued", "running"}:
             record.update({"status": "free", "updated_at": _now()})
+        return
+    try:
+        # The queue may have waited while a backup import replaced EMAILS[id].
+        # Revalidate the exact current payload before writing any child input.
+        _deliver_shared_email_records([record])
+    except MailboxBoundaryError as exc:
+        task.update({"status": "failed", "returncode": -1, "message": str(exc),
+                     "finished_at": _now(), "updated_at": _now()})
+        record.update({"status": "failed", "last_error": str(exc), "updated_at": _now()})
+        await _persist()
         return
     TEMP_ROOT.mkdir(parents=True, exist_ok=True)
     input_path = TEMP_ROOT / f"{task_id}.txt"
@@ -696,7 +771,7 @@ async def import_factory_emails() -> dict[str, Any]:
     source = MAIN_EMAILS_PATH
     if not source.is_file():
         return JSONResponse({"error": "主项目 emails.txt 不存在"}, status_code=404)
-    records, errors = _normalize_records(source.read_text(encoding="utf-8-sig"))
+    records, errors = _shared_email_records_with_errors()
     existing = {item.get("email", "").lower() for item in EMAILS.values()}
     added = 0
     for record in records:
@@ -749,12 +824,12 @@ async def split_emails(request: Request) -> dict[str, Any]:
     payload = await request.json()
     ids = [str(item) for item in (payload or {}).get("ids") or [] if str(item)]
     count = max(1, min(50, int((payload or {}).get("count") or 4)))
+    parents = [EMAILS[item] for item in ids
+               if item in EMAILS and EMAILS[item].get("status") != "running"]
+    _deliver_shared_email_records(parents)
     by_email = {record.get("email", "").lower() for record in EMAILS.values()}
     created = 0
-    for record_id in ids:
-        parent = EMAILS.get(record_id)
-        if not parent or parent.get("status") == "running":
-            continue
+    for parent in parents:
         for index in range(1, count + 1):
             child = _alias_email(parent, index)
             if child["email"].lower() in by_email:
@@ -811,6 +886,13 @@ async def check_task_tokens(request: Request) -> dict[str, Any]:
             result = {"task_id": task.get("id"), "email": task.get("email"), "ok": False, "inactive": True, "status": 401, "message": "access token 已过期"}
         else:
             try:
+                # Scanner defaults may use a different data root when the main
+                # pool path is overridden. Pin K12's own source boundary first.
+                email = str(task.get("email") or "").strip().lower()
+                records = [{"email": email}]
+                records.extend(record for record in EMAILS.values()
+                               if str(record.get("email") or "").strip().lower() == email)
+                _deliver_shared_email_records(records)
                 from common.asset_scanner import _scan_chatgpt_plus_trial
                 checked = await asyncio.to_thread(_scan_chatgpt_plus_trial, {"email": task.get("email")}, token, 20)
                 ok = checked.get("plus_trial") not in {"unknown"}
@@ -835,7 +917,7 @@ async def repair_inactive_at(request: Request) -> dict[str, Any]:
         if task.get("at_status") == "inactive" and (not requested or task.get("id") in requested)
     ]
     seen: set[str] = set()
-    created = []
+    selected = []
     for source in sorted(candidates, key=lambda item: item.get("at_checked_at", ""), reverse=True):
         email_id = str(source.get("email_id") or "")
         if not email_id or email_id in seen:
@@ -844,23 +926,55 @@ async def repair_inactive_at(request: Request) -> dict[str, Any]:
         if not record or record.get("status") in {"running", "queued"}:
             continue
         seen.add(email_id)
+        selected.append(record)
+        if len(selected) >= 100:
+            break
+    _reserve_shared_emails(selected)
+    created = []
+    for record in selected:
         task = _new_task(record, source="repair-at")
         record.update({"status": "queued", "updated_at": _now(), "last_error": ""})
         created.append(_public_task(task))
         asyncio.create_task(_run_task(task["id"], record["id"]))
-        if len(created) >= 100:
-            break
     await _persist()
     return {"tasks": created, "count": len(created)}
 
 
+def _task_has_credentials(value: Any) -> bool:
+    """Imported task blobs are not an authenticated credential container.
+
+    Normal task history has none of these fields. Do not authorize an opaque
+    token merely because an imported task labels it with an unrelated email.
+    This is a structured-field check, not detection of secrets in arbitrary text.
+    """
+    secret_keys = {"password", "accountpassword", "refreshtoken", "accesstoken",
+                   "sessiontoken", "sessionkey", "idtoken", "clientsecret",
+                   "secret", "credentials", "oauth", "cookies", "cookie",
+                   "raw", "token", "apikey", "mailapikey", "twofactor", "otp"}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = str(key).replace("_", "").replace("-", "").lower()
+            if normalized in secret_keys and item not in (None, "", [], {}):
+                return True
+            if _task_has_credentials(item):
+                return True
+    elif isinstance(value, list):
+        return any(_task_has_credentials(item) for item in value)
+    return False
+
+
 @app.get("/api/data/export")
 async def export_data() -> Response:
+    # A backup is an all-or-nothing credential export, not an inventory view.
+    # Refuse a conflicting cached record rather than emit a partial backup.
+    if any(_task_has_credentials(task) for task in TASKS.values()):
+        raise MailboxBoundaryError()
+    records = _deliver_shared_email_records(list(EMAILS.values()))
     bundle = {
         "version": "1.0",
         "exported_at": _now(),
         "config": dict(CONFIG),
-        "emails": list(EMAILS.values()),
+        "emails": records,
         "tasks": list(TASKS.values()),
     }
     content = json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")
@@ -921,12 +1035,13 @@ async def create_tasks(request: Request) -> dict[str, Any]:
         selected = [item for item in EMAILS.values() if item.get("status") == "free"][:count]
     if CONFIG.get("run_workspace_join") and not CONFIG.get("workspace_ids"):
         return JSONResponse({"error": "请先配置 K12 Workspace ID"}, status_code=400)
+    # Validate the entire selection before scheduling any child. A later
+    # ownership rejection must not leave an invisible, partially started batch.
+    _reserve_shared_emails([record for record in selected if record.get("status") == "free"])
     created = []
     for record in selected:
         if record.get("status") != "free":
             continue
-        if record.get("pool_source") == "main":
-            _reserve_shared_email(record)
         task = _new_task(record)
         task_id = task["id"]
         record.update({"status": "queued", "updated_at": _now(), "last_error": ""})
@@ -995,9 +1110,8 @@ async def retry_task(task_id: str) -> dict[str, Any]:
         return JSONResponse({"error": "邮箱记录不存在"}, status_code=404)
     if record.get("status") == "running":
         return JSONResponse({"error": "邮箱正在运行"}, status_code=409)
+    _reserve_shared_email(record)
     task = _new_task(record, source=task_id)
-    if record.get("pool_source") == "main":
-        _reserve_shared_email(record)
     record.update({"status": "queued", "updated_at": _now()})
     await _persist()
     asyncio.create_task(_run_task(task["id"], record["id"]))

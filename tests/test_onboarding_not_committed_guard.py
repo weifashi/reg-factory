@@ -498,7 +498,11 @@ def sql_violations(source, module):
                 continue
             first = node.args[0]
             text = constants.get(first.id) if isinstance(first, ast.Name) else rebuilt(first)
-            if text is None or WRITE_WORD.search(text):
+            # An exact, single GRANT statement names a privilege, not a DML
+            # operation. No arbitrary prefix/suffix or second statement is allowed.
+            safe_grant = (isinstance(first, ast.Constant) and type(first.value) is str
+                          and first.value == 'GRANT SELECT, INSERT, UPDATE ON {} TO rf_onboarding_app')
+            if text is None or (WRITE_WORD.search(text) and not safe_grant):
                 found.append('dynamic UPDATE/DELETE composition in %s:%s' % (module, function_of(node)))
     return found
 
@@ -675,6 +679,7 @@ class NotCommittedGuardTests(unittest.TestCase):
                            "NEW.sale_eligibility := 'INELIGIBLE'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql;\n"
                            'ALTER TABLE secret_objects DROP CONSTRAINT secret_objects_kind_check;\n'
                            'ALTER TABLE operation_receipts ALTER COLUMN task_id DROP NOT NULL;\n',
+            'literal-grant.py': "from psycopg import sql\nS = sql.SQL('GRANT SELECT, INSERT, UPDATE ON {} TO rf_onboarding_app')\n",
             'grants.py': "from psycopg import sql\nGRANTS = 'SELECT, INSERT'\n"
                          "S = sql.SQL('GRANT ' + GRANTS + ' ON {} TO rf_onboarding_app')\n",
         }
@@ -696,6 +701,9 @@ class NotCommittedGuardTests(unittest.TestCase):
             'quoted-alias-version': 'Q = \'UPDATE onboarding_tasks "t" SET version="t".version+1 WHERE "t".id=%s\'\n',
         }
         must_flag = {
+            'grant-dynamic-fstring': "from psycopg import sql\nS = sql.SQL(f'GRANT SELECT, INSERT, UPDATE ON {untrusted} TO rf_onboarding_app')\n",
+            'grant-dynamic-concat': "from psycopg import sql\nS = sql.SQL('GRANT SELECT, INSERT, UPDATE ON ' + untrusted + ' TO rf_onboarding_app')\n",
+            'grant-plus-write': "from psycopg import sql\nS = sql.SQL('GRANT SELECT, INSERT, UPDATE ON {} TO rf_onboarding_app; UPDATE mailbox_registry SET email_norm=%s')\n",
             'excluded-version': "Q = 'INSERT INTO onboarding_tasks(id) VALUES(%s) ON CONFLICT (id) DO UPDATE SET version=EXCLUDED.version+1'\n",
             'other-table-version': "Q = 'UPDATE onboarding_tasks SET version=s.version+1 FROM src s WHERE onboarding_tasks.id=s.id'\n",
             'quoted-paren': 'Q = "UPDATE mailbox_registry SET group_ref=\')\', email_norm=%s WHERE id=%s"\n',

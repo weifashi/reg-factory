@@ -99,6 +99,13 @@ class LegacySecurityTests(TestCase):
                 endpoint = getattr(route, 'endpoint', None)
                 if endpoint is None or endpoint.__module__ != s.__name__ or endpoint.__name__ in {'index','api_env_get','api_env_set','onboarding_login_page'}:
                     continue
+                if endpoint.__name__ == 'onboarding_diagnostics_page':
+                    # This fixed static maintenance route replaces the old index alias;
+                    # it is not a legacy executor and remains authenticated by ASGI.
+                    self.assertEqual(route.path, '/onboarding')
+                    self.assertEqual(route.methods, {'GET'})
+                    self.assertEqual(endpoint(), 'fixture-protected-page')
+                    continue
                 count += 1
                 # Wrapper must fail before it tries to read required request/provider inputs.
                 result = endpoint()

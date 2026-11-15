@@ -229,6 +229,7 @@ def lock_task(conn, actor, task_id, permission='tasks:manage', expected_version=
     if type(cfg[2]) is not dict or any(type(key) is not str for key in cfg[2]):
         _broken()
     config = pool_config._project(cfg)
+    pool_config._require_synthetic(config)
     task.update(config_revision=config['revision'], config_scope=config['scope'],
                 nonsecret_config=config['nonsecret_config'], mailbox_owner_id=owner)
     _secret(conn, task['mailbox_credential_ref'], 'mailbox_credential',

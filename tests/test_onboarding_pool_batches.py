@@ -733,20 +733,40 @@ class PoolBatchEntryTests(onboarding_pool_support.PoolCase):
     def waited_expiry(self, boundary, deadline_kind, *, automatic=False):
         """Prepare before arming; prove a real wait straddles one DB deadline.
 
-        For secret-row contention only, arm/COMMIT the expiry immediately before
-        taking its row lock: the worker sees that committed deadline, never an
-        old uncommitted snapshot. No clock seam or widened timeout is used.
+        For secret-row contention only, first park the worker immediately before
+        the target platform-secret FOR SHARE. Only then arm/COMMIT expiry and
+        acquire the blocker: automatic selection/auth are outside the 1200ms
+        window, and the actual SELECT still sees a committed deadline. The
+        Python barrier is NOT wait evidence; pg_blocking_pids must prove the
+        subsequent real PG wait straddles expiry. No clock or timeout seam.
         """
         table='operator_sessions' if deadline_kind=='session' else 'secret_objects'
         evidence=dict(table=table,boundary=boundary,worker_pid=None,blocker_pid=None,
                       deadline=None,first_wait_at=None,last_db_now=None,results=[],
-                      thread_alive=False,waiting=False)
+                      thread_alive=False,waiting=False,secret_gate_reached=False,
+                      blocker_release_mode='rollback' if boundary=='secret' else 'commit',
+                      blocker_release_ms=None,arm_commit_ms=None,blocker_lock_ms=None,
+                      finished_after_arm_ms=None)
         self.batch_wait_evidence=evidence
         ready=threading.Event(); start=threading.Event(); abort=threading.Event(); done=threading.Event()
+        secret_ready=threading.Event(); secret_release=threading.Event()
         worker=control=blocker=thread=transaction=None
+        arm_started=None
         real_open=storage.open_app
+        real_execute=psycopg.Cursor.execute
         def opened(settings):
             return worker if threading.current_thread().name=='fixture:expiry' else real_open(settings)
+        def gated_execute(cursor,query,params=None,**kwargs):
+            target=('SELECT '+pool_leases._SECRET_COLUMNS+' FROM secret_objects WHERE id=%s FOR SHARE')
+            if (boundary=='secret' and threading.current_thread().name=='fixture:expiry'
+                    and query==target and params==(seed['platform_secret'],)):
+                evidence['secret_gate_reached']=True
+                secret_ready.set()
+                if not secret_release.wait(4):
+                    raise AssertionError('fixture target secret gate was not released')
+                if abort.is_set():
+                    raise ServiceError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+            return real_execute(cursor,query,params,**kwargs)
         def run():
             try:
                 kwargs = dict(selection='automatic',mailbox_ids=[]) if automatic else {}
@@ -758,7 +778,10 @@ class PoolBatchEntryTests(onboarding_pool_support.PoolCase):
                 self.call(config,[seed],**kwargs); evidence['results'].append('OK')
             except ServiceError as exc: evidence['results'].append(exc.code.value)
             except Exception as exc: evidence['results'].append(type(exc).__name__)
-            finally: done.set()
+            finally:
+                if arm_started is not None:
+                    evidence['finished_after_arm_ms']=round((time.monotonic()-arm_started)*1000,3)
+                done.set()
         try:
             config=self.config(); seed=self.seed(platform_secret=True)
             accepted=self.call(config,[seed]) if boundary=='receipt' else None
@@ -771,7 +794,11 @@ class PoolBatchEntryTests(onboarding_pool_support.PoolCase):
             blocker=self.fixture.migrator() if boundary=='audit' else storage.open_app(self.settings)
             pid,bpid=worker.info.backend_pid,blocker.info.backend_pid
             evidence.update(worker_pid=pid,blocker_pid=bpid)
-            transaction=blocker.transaction(); transaction.__enter__()
+            # The secret blocker writes no business data: expires_at is
+            # separately committed by control. Release with ROLLBACK so a
+            # needless synchronous COMMIT/WAL wait cannot exhaust the worker's
+            # unchanged lock_timeout after we have proved expiry crossed.
+            transaction=blocker.transaction(force_rollback=boundary=='secret'); transaction.__enter__()
             if boundary=='config': pool_config._guard_locked(blocker)
             elif boundary=='state': blocker.execute('SELECT id FROM mailbox_platform_states WHERE id=%s FOR UPDATE',(seed['state'],))
             elif boundary=='lease':
@@ -781,19 +808,32 @@ class PoolBatchEntryTests(onboarding_pool_support.PoolCase):
             elif boundary!='secret': self.fail('unrecognized fixture boundary')
             identity=self.actor.session_id if deadline_kind=='session' else seed['platform_secret']
             field='idle_expires_at' if deadline_kind=='session' else 'expires_at'
-            with patch.object(storage,'open_app',opened):
+            with patch.object(storage,'open_app',opened), patch.object(psycopg.Cursor,'execute',gated_execute):
                 thread=threading.Thread(target=run,name='fixture:expiry'); thread.start()
                 self.assertTrue(ready.wait(4))
+                if boundary=='secret':
+                    start.set()
+                    gate_finish=time.monotonic()+4
+                    while not secret_ready.wait(.01):
+                        self.assertFalse(done.is_set(),'worker finished before target secret boundary')
+                        self.assertLess(time.monotonic(),gate_finish,'worker did not reach target secret boundary')
+                    self.assertFalse(done.is_set(),'worker finished before target secret boundary')
                 # All connections, snapshot, empty lease and worker are ready.
-                # Only secret's lock must follow the committed deadline UPDATE.
+                # Secret's pre-lock work is now complete; the committed expiry
+                # must precede both the blocker lock and worker's real SELECT.
+                arm_started=time.monotonic()
                 cursor=control.execute('UPDATE '+table+' SET '+field+"=clock_timestamp()+interval '1200 milliseconds' "
                                        'WHERE id=%s RETURNING *',(identity,))
                 row=cursor.fetchone()
+                evidence['arm_commit_ms']=round((time.monotonic()-arm_started)*1000,3)
                 expires=row[[column.name for column in cursor.description].index(field)]
                 evidence['deadline']=expires.isoformat()
                 original[table]=[row if str(value[0])==identity else value for value in original[table]]
                 if boundary=='secret':
+                    lock_started=time.monotonic()
                     blocker.execute('SELECT id FROM secret_objects WHERE id=%s FOR UPDATE',(seed['platform_secret'],))
+                    evidence['blocker_lock_ms']=round((time.monotonic()-lock_started)*1000,3)
+                    secret_release.set()
                 start.set()
                 finish=time.monotonic()+2
                 first_wait_at=None
@@ -804,9 +844,9 @@ class PoolBatchEntryTests(onboarding_pool_support.PoolCase):
                     if waiting and first_wait_at is None:
                         first_wait_at=now
                         evidence['first_wait_at']=now.isoformat()
-                        self.assertLess(first_wait_at,expires)
-                    self.assertFalse(done.is_set())
-                    self.assertTrue(thread.is_alive())
+                        self.assertLess(first_wait_at,expires,evidence)
+                    self.assertFalse(done.is_set(),evidence)
+                    self.assertTrue(thread.is_alive(),evidence)
                     if first_wait_at is not None and now>expires:
                         self.assertTrue(waiting)
                         self.assertLess(first_wait_at,expires)
@@ -814,12 +854,14 @@ class PoolBatchEntryTests(onboarding_pool_support.PoolCase):
                         break
                     self.assertLess(time.monotonic(),finish)
                     time.sleep(.01)
+                release_started=time.monotonic()
                 transaction.__exit__(None,None,None); transaction=None
+                evidence['blocker_release_ms']=round((time.monotonic()-release_started)*1000,3)
                 thread.join(5); self.assertFalse(thread.is_alive())
             code=ErrorCode.UNAUTHENTICATED if deadline_kind=='session' else ErrorCode.SECRET_UNAVAILABLE
-            self.assertEqual(evidence['results'],[code.value])
+            self.assertEqual(evidence['results'],[code.value],evidence)
         finally:
-            abort.set(); start.set()
+            abort.set(); start.set(); secret_release.set()
             try:
                 if transaction is not None: transaction.__exit__(None,None,None)
             finally:
@@ -849,6 +891,48 @@ class PoolBatchEntryTests(onboarding_pool_support.PoolCase):
 
     def test_actual_secret_wait_then_platform_secret_expiry(self):
         self.waited_expiry('secret','secret',automatic=True)
+
+    def test_secret_expiry_fixture_arms_after_slow_automatic_selection(self):
+        delayed=[]
+        def before(cursor,query,params):
+            if threading.current_thread().name=='fixture:expiry' and query==module()._AUTO and not delayed:
+                delayed.append(True)
+                # Real pre-lock workload exceeds the old 1200ms timer. Neither
+                # DB time nor the business's statement/lock deadlines are mocked.
+                time.sleep(1.3)
+        with observe(before=before):
+            self.waited_expiry('secret','secret',automatic=True)
+        self.assertEqual(delayed,[True])
+
+    def test_secret_expiry_fixture_rejects_failure_before_actual_wait(self):
+        # Even the expected terminal code is NOT proof that the wait occurred.
+        # A test-only failure before selection must never satisfy this fixture.
+        with patch.object(module(),'_resources',side_effect=ServiceError(ErrorCode.SECRET_UNAVAILABLE)):
+            with self.assertRaisesRegex(AssertionError,'worker finished before target secret boundary'):
+                self.waited_expiry('secret','secret',automatic=True)
+        evidence=self.batch_wait_evidence
+        self.assertEqual(evidence['results'],[ErrorCode.SECRET_UNAVAILABLE.value])
+        self.assertIsNone(evidence['deadline'])
+        self.assertIsNone(evidence['first_wait_at'])
+        self.assertFalse(evidence['secret_gate_reached'])
+        self.assertFalse(evidence['waiting'])
+        self.assertFalse(evidence['thread_alive'])
+
+    def test_secret_expiry_fixture_does_not_wait_for_blocker_commit(self):
+        # A lock-only blocker has nothing to commit. Delay ONLY its COMMIT to
+        # expose any fixture WAL/durability wait that could consume the worker's
+        # remaining 2s lock budget; production timeouts and SQL remain real.
+        execute=psycopg.Connection._exec_command
+        commits=[]
+        def command(conn,query,*args,**kwargs):
+            target=getattr(self,'batch_wait_evidence',{}).get('blocker_pid')
+            if query in ('COMMIT',b'COMMIT') and conn.info.backend_pid==target:
+                commits.append(True)
+                time.sleep(1.1)
+            return execute(conn,query,*args,**kwargs)
+        with patch.object(psycopg.Connection,'_exec_command',command):
+            self.waited_expiry('secret','secret',automatic=True)
+        self.assertEqual(commits,[])
 
     def test_actual_receipt_wait_then_session_expiry(self):
         self.waited_expiry('receipt','session')

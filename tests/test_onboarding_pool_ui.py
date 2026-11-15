@@ -24,7 +24,7 @@ FIELDS = dict(model='fixture-model', region='fixture-region', instance_ref='fixt
               concurrency=1, retention_days=7)
 TASK = dict(id=TID, execution_scope='pool', batch_id=MID, config_id=MID,
             config_revision=REV, status='QUEUED', version=1, reason_code=None,
-            current_step=None, generation=1, cancel_requested=False, synthetic=True)
+            current_step=None, generation=1, cancel_requested=False, synthetic=True, execution_mode='synthetic')
 MAILBOX = dict(id=MID, email='fixture-ui@example.test', group_ref='fixture:group',
                health='UNKNOWN', disabled=False, occupied=False, version=1,
                platforms=[dict(platform='google', identity_status='UNKNOWN', usage_status='HISTORY_UNRECONCILED')])
@@ -187,6 +187,10 @@ class PoolDomTests(unittest.TestCase):
         self.page.wait_for_load_state('networkidle')
         self.assertEqual(self.page.locator('#main').count(), 1, 'protected page has not been implemented')
         self.settle()
+        for identity in ('google-advanced', 'task-history'):
+            disclosure = self.page.locator('#' + identity)
+            if disclosure.count():
+                disclosure.locator('summary').first.click()
 
     def calls(self, method, path):
         return [entry for entry in self.requests if entry[0:2] == (method,path)]
@@ -205,6 +209,12 @@ class PoolDomTests(unittest.TestCase):
         """Issue exactly the named request, then wait for its handler to finish; returns the body."""
         if isinstance(trigger, str):
             target = trigger
+            # Mailbox mutations now live behind on-demand row controls. Exercise
+            # their real click path without changing any request/permission checks.
+            if target == '[data-save-group]' and not self.page.locator(target).is_visible():
+                self.page.locator('[data-mailbox-edit]').click()
+            if target == 'button[data-mailbox-write]:not([data-save-group])' and not self.page.locator(target).is_visible():
+                self.page.locator('[data-mailbox-more]').click()
             trigger = lambda: self.page.locator(target).click()
         from playwright.sync_api import TimeoutError as PageTimeout
         try:
@@ -236,9 +246,141 @@ class PoolDomTests(unittest.TestCase):
         self.page.locator('#import-text').fill('fixture-ui@example.test----fixture-ui-password')
         self.act('#preview-import', 'POST', '/api/onboarding/mailboxes/import-preview')
 
+    def test_original_shell_desktop_workbench_and_honest_unavailable_tools(self):
+        self.page.set_viewport_size(dict(width=1440, height=1000))
+        self.start('/onboarding/pools#batch-card')
+        self.assertEqual(self.page.locator('.sidebar').count(), 1, 'original sidebar missing')
+        self.assertEqual(self.page.locator('.brand-mark').inner_text(), 'RF')
+        self.assertEqual(self.page.locator('.sidebar').bounding_box()['width'], 228)
+        left = self.page.locator('#batch-card').bounding_box()
+        right = self.page.locator('#tasks-card').bounding_box()
+        self.assertGreater(right['x'], left['x'] + left['width'])
+        self.assertLess(abs(left['y'] - right['y']), 2)
+        self.assertEqual(self.page.locator('[data-shell-target="batch-card"]').get_attribute('aria-current'), 'location')
+        self.assertIn('不是执行进程的实时输出', self.page.locator('#worker-log-notice').inner_text())
+        self.assertIn('执行服务尚未接入', self.page.locator('#google-mode-help').inner_text())
+        self.assertTrue(self.page.locator('#google-execution-mode option[value=real]').is_disabled())
+        # Card CRUD was integrated earlier; this fixture lacks cards:manage.
+        # Assert the actual write boundary rather than treating all tabs as executors.
+        self.page.locator('[data-shell-target="card-pool"]').click()
+        self.assertIn('绑定 worker 尚未接入',self.page.locator('#card-pool').inner_text())
+        for selector in ('#card-save','#card-preview-csv','#card-confirm'):
+            self.assertTrue(self.page.locator(selector).is_disabled())
+        for target in ('network-panel', 'legacy-tools'):
+            self.page.locator('[data-shell-target="' + target + '"]').click()
+            self.assertIn('尚未接入', self.page.locator('#' + target).inner_text())
+            self.assertEqual(self.page.locator('#' + target + ' button:not(:disabled)').count(), 0)
+        self.assertFalse(any(path in ('/api/scripts', '/api/status', '/api/proxy') for _, path, _, _ in self.requests))
+
+    def test_shell_navigation_clears_import_and_keeps_pending_request(self):
+        self.start()
+        self.assertEqual(self.page.locator('[data-shell-target="mailbox-card"]').count(), 1, 'mailbox navigation missing')
+        self.import_preview()
+        self.page.locator('[data-shell-target="global-config"]').focus()
+        self.page.keyboard.press('Enter')
+        self.assertEqual(self.page.locator('#import-text').input_value(), '')
+        self.assertEqual(self.page.locator('#import-preview').inner_text(), '')
+        self.assertTrue(self.page.locator('#confirm-import').is_disabled())
+        self.overrides[('POST', '/api/onboarding/batches')] = GATEWAY
+        self.act('#preflight', 'POST', '/api/onboarding/preflight')
+        self.act('#confirm-batch', 'POST', '/api/onboarding/batches')
+        self.assertTrue(self.page.locator('#reconcile-card').is_visible())
+        receipt = self.page.locator('#reconcile-note').inner_text()
+        self.page.locator('.skip-link').focus()
+        self.page.keyboard.press('Enter')
+        self.assertEqual(self.page.locator('#reconcile-note').inner_text(), receipt)
+        self.page.locator('[data-shell-target="mailbox-card"]').click()
+        self.page.locator('[data-shell-target="batch-card"]').click()
+        self.assertEqual(self.page.locator('#reconcile-note').inner_text(), receipt)
+        self.assertEqual(len(self.calls('POST', '/api/onboarding/batches')), 1)
+        self.assertTrue(self.page.locator('#confirm-batch').is_disabled())
+
+    def test_shell_skip_link_focuses_main_without_changing_business_section(self):
+        self.start('/onboarding/pools#batch-card')
+        self.page.locator('.skip-link').focus()
+        self.page.keyboard.press('Enter')
+        self.until(lambda: urlsplit(self.page.url).fragment == 'main', 'skip link did not navigate to main')
+        self.assertEqual(self.page.evaluate('document.activeElement.id'), 'main')
+        self.assertEqual(self.page.locator('[data-shell-target="batch-card"]').get_attribute('aria-current'), 'location')
+        self.assertEqual(len(self.calls('GET', '/api/auth/session')), 1)
+
+    def test_shell_busy_import_navigation_waits_without_bypassing_controls(self):
+        self.start()
+        self.page.locator('#tab-import').click()
+        self.page.locator('#import-text').fill('fixture-ui@example.test----fixture-ui-password')
+        held = []
+        self.page.route('**/api/onboarding/mailboxes/import-preview', lambda route: held.append(route))
+        self.page.locator('#preview-import').click()
+        self.until(lambda: held, 'import preview not issued')
+        self.assertTrue(self.page.locator('#tab-list').is_disabled())
+        self.page.locator('[data-shell-target="global-config"]').click()
+        self.assertEqual(self.page.locator('#tab-import').get_attribute('aria-selected'), 'true')
+        self.assertNotIn('#global-config', self.page.url)
+        self.page.locator('.skip-link').focus()
+        self.page.keyboard.press('Enter')
+        self.assertEqual(self.page.evaluate('document.activeElement.id'), 'main')
+        self.assertTrue(self.page.locator('#tab-list').is_disabled())
+        self.assertEqual(self.page.locator('#tab-import').get_attribute('aria-selected'), 'true')
+        self.assertEqual(self.page.locator('#import-text').input_value(), 'fixture-ui@example.test----fixture-ui-password')
+        held[0].fulfill(status=503, content_type='application/json', body=json.dumps(dict(code='DEPENDENCY_UNAVAILABLE')))
+        self.settle()
+        self.page.locator('[data-shell-target="global-config"]').click()
+        self.assertEqual(self.page.locator('#import-text').input_value(), '')
+        self.assertEqual(self.page.locator('[data-shell-target="global-config"]').get_attribute('aria-current'), 'location')
+        self.page.go_back()  # The skip-link added its own non-business history entry.
+        self.assertEqual(urlsplit(self.page.url).fragment, 'main')
+        self.assertEqual(self.page.locator('[data-shell-target="global-config"]').get_attribute('aria-current'), 'location')
+        self.page.go_back()
+        self.until(lambda: self.page.locator('[data-shell-target="mailbox-card"]').get_attribute('aria-current') == 'location', 'back navigation did not select mailbox')
+        self.assertEqual(len(self.calls('GET', '/api/auth/session')), 1)
+
+    def test_shell_mobile_menu_tab_cycle_excludes_header_logout(self):
+        self.page.set_viewport_size(dict(width=390, height=844))
+        self.start()
+        self.page.locator('#shell-menu').click()
+        self.page.locator('#shell-menu').focus()
+        self.page.keyboard.press('Tab')
+        # The additive original-console link is now first in the sidebar.
+        self.assertTrue(self.page.locator('.sidebar a[href="/"]').evaluate('node => node === document.activeElement'))
+        self.page.keyboard.press('Tab')
+        self.assertTrue(self.page.locator('[data-shell-target="batch-card"]').evaluate('node => node === document.activeElement'))
+        self.page.locator('.sidebar-footer a').focus()
+        self.page.keyboard.press('Tab')
+        self.assertTrue(self.page.locator('#shell-menu').evaluate('node => node === document.activeElement'))
+        self.page.keyboard.press('Shift+Tab')
+        self.assertTrue(self.page.locator('.sidebar-footer a').evaluate('node => node === document.activeElement'))
+        self.page.locator('[data-shell-target="batch-card"]').focus()
+        self.page.keyboard.press('Shift+Tab')
+        self.assertTrue(self.page.locator('.sidebar a[href="/"]').evaluate('node => node === document.activeElement'))
+        self.page.keyboard.press('Shift+Tab')
+        self.assertTrue(self.page.locator('#shell-menu').evaluate('node => node === document.activeElement'))
+
+    def test_shell_mobile_menu_keyboard_and_content_fit(self):
+        self.page.set_viewport_size(dict(width=390, height=844))
+        self.start()
+        self.assertEqual(self.page.locator('#shell-menu').count(), 1, 'mobile menu missing')
+        self.assertTrue(self.page.locator('.sidebar').evaluate('node => node.inert'))
+        self.page.locator('#shell-menu').focus()
+        self.page.keyboard.press('Enter')
+        self.assertEqual(self.page.locator('#shell-menu').get_attribute('aria-expanded'), 'true')
+        self.assertFalse(self.page.locator('.sidebar').evaluate('node => node.inert'))
+        self.page.keyboard.press('Escape')
+        self.assertEqual(self.page.locator('#shell-menu').get_attribute('aria-expanded'), 'false')
+        self.assertTrue(self.page.locator('#shell-menu').evaluate('node => node === document.activeElement'))
+        self.page.locator('#shell-menu').click()
+        self.page.locator('[data-shell-target="batch-card"]').click()
+        self.assertEqual(self.page.locator('#shell-menu').get_attribute('aria-expanded'), 'false')
+        self.assertTrue(self.page.locator('#batch-card').evaluate('node => node === document.activeElement'))
+        for width in (390, 1440):
+            self.page.set_viewport_size(dict(width=width, height=1000))
+            self.assertTrue(self.page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+            self.assertTrue(self.page.locator('#main').evaluate('node => node.scrollWidth <= node.clientWidth'))
+
     def test_list_platform_filter_and_cursor_reset(self):
         self.start()
-        self.assertIn('HISTORY_UNRECONCILED', self.page.locator('#mailbox-list').inner_text())
+        self.page.locator('[data-mailbox-detail]').click()
+        self.assertIn('HISTORY_UNRECONCILED', self.page.locator('#mailbox-detail').inner_text())
+        self.page.keyboard.press('Escape')
         self.act('#mailbox-next', 'GET', '/api/onboarding/mailboxes')
         self.assertIn('cursor=fixture-cursor', self.calls('GET','/api/onboarding/mailboxes')[-1][3])
         self.act(lambda: self.page.locator('#platform').select_option('google'), 'GET', '/api/onboarding/mailboxes')
@@ -281,7 +423,7 @@ class PoolDomTests(unittest.TestCase):
         self.assertEqual(body['duplicate_action'], 'skip')
         self.assertEqual(body['expected_versions'], {})
         self.assertEqual(self.page.locator('#import-text').input_value(), '')
-        self.assertIn('UNKNOWN', self.page.locator('#message').inner_text())
+        self.assertIn('账号状态仍待核验', self.page.locator('#message').inner_text())
 
     def test_declined_import_confirmation_clears_secret_without_request(self):
         self.start(); self.import_preview()
@@ -309,6 +451,7 @@ class PoolDomTests(unittest.TestCase):
 
     def test_cas_patch_only_group_or_disabled(self):
         self.start()
+        self.page.locator('[data-mailbox-edit]').click()
         self.page.locator('[data-mailbox-group]').fill('fixture:group-alt')
         body = self.act('[data-save-group]','PATCH','/api/onboarding/mailboxes/' + MID,text='修改已受理')
         self.assertEqual(body['expected_version'], 1)
@@ -336,11 +479,13 @@ class PoolDomTests(unittest.TestCase):
         self.act('#preflight','POST','/api/onboarding/preflight')
         self.assert_quiet('POST','/api/onboarding/batches',0)
         self.assertIn('观察',self.page.locator('#preflight-result').inner_text())
-        body = self.act('#confirm-batch','POST','/api/onboarding/batches',text='批次已受理')
+        body = self.act('#confirm-batch','POST','/api/onboarding/batches',text='批次已受理',selector='#batch-result')
         self.assertEqual(body['expected_config_revision'], REV)
         self.assertEqual(body['requested_count'], 1)
         self.assertEqual(body['mailbox_ids'], [])
-        self.assertIn('非注册成功',self.page.locator('#batch-result').inner_text())
+        self.assertIn('任务批次已受理',self.page.locator('#batch-result').inner_text())
+        self.assertIn('不执行注册、绑卡或模型调用',self.dialogs[-1])
+        self.assertIn('任务已创建不代表 Google 已开通',self.page.locator('#worker-log-notice').inner_text())
         self.assertNotIn('可进入确认',self.page.locator('#preflight-result').inner_text())
         self.assertIn('重新预检',self.page.locator('#preflight-result').inner_text())
 
@@ -353,7 +498,7 @@ class PoolDomTests(unittest.TestCase):
         reads = {path: len(self.calls('GET', path)) for path in ('/api/onboarding/tasks','/api/onboarding/mailboxes')}
         self.page.evaluate("window.dispatchEvent(new Event('pagehide'))")
         held[0].fulfill(status=202,content_type='application/json',body=json.dumps(dict(batch_id=MID,task_ids=[TID],mailbox_ids=[MID],receipt_id=MID,config_id=MID,config_revision=REV,phase='SUCCEEDED')))
-        self.settle('批次已受理')
+        self.settle('批次已受理',selector='#batch-result')
         self.page.wait_for_timeout(300)
         self.assertEqual({path: len(self.calls('GET', path)) for path in reads}, reads)
 
@@ -429,10 +574,13 @@ class PoolDomTests(unittest.TestCase):
         count = len(self.calls('GET','/api/onboarding/mailboxes'))
         reserved = {**MAILBOX, 'occupied':True, 'version':2, 'platforms':[dict(platform='google',identity_status='UNKNOWN',usage_status='RESERVED')]}
         self.overrides[('GET','/api/onboarding/mailboxes')] = (200, dict(items=[reserved], next_cursor=None))
-        self.act('#confirm-batch','POST','/api/onboarding/batches',text='批次已受理')
+        self.act('#confirm-batch','POST','/api/onboarding/batches',text='批次已受理',selector='#batch-result')
         self.assertEqual(len(self.calls('GET','/api/onboarding/mailboxes')), count + 1)
-        self.assertIn('RESERVED', self.page.locator('#mailbox-list').inner_text())
-        self.assertIn('观察到逻辑占用', self.page.locator('#mailbox-list').inner_text())
+        self.assertIn('占用中', self.page.locator('#mailbox-list').inner_text())
+        self.page.locator('[data-mailbox-detail]').click()
+        self.assertIn('RESERVED', self.page.locator('#mailbox-detail').inner_text())
+        self.assertIn('观察到逻辑占用', self.page.locator('#mailbox-detail').inner_text())
+        self.page.keyboard.press('Escape')
 
     def test_failed_reads_do_not_leave_loading_or_previous_results(self):
         self.start()
@@ -583,7 +731,7 @@ class PoolDomTests(unittest.TestCase):
     def test_successful_reconcile_clears_request_memory(self):
         self.unknown_batch()
         del self.overrides[('POST','/api/onboarding/batches')]
-        self.act('#reconcile-request','POST','/api/onboarding/batches',text='批次已受理')
+        self.act('#reconcile-request','POST','/api/onboarding/batches',text='批次已受理',selector='#batch-result')
         self.assertTrue(self.page.locator('#reconcile-card').is_hidden())
         self.assertEqual(self.page.locator('#reconcile-note').text_content(),'')
         self.assertTrue(self.page.locator('#preflight').is_enabled())
@@ -747,7 +895,7 @@ class PoolDomTests(unittest.TestCase):
     def test_corrupt_mailbox_page_never_displays_partial_rows(self):
         self.overrides[('GET','/api/onboarding/mailboxes')] = (200,dict(items=[MAILBOX,{'id':'broken'}],next_cursor=None))
         self.start()
-        self.assertEqual(self.page.locator('#mailbox-list .pool-item').count(),0)
+        self.assertEqual(self.page.locator('#mailbox-list tr').count(),0)
         self.assertIn('部分坏行',self.page.locator('#mailbox-state').inner_text())
 
     def test_empty_state_is_explicit(self):
@@ -763,7 +911,7 @@ class PoolDomTests(unittest.TestCase):
         self.assertTrue(self.page.locator('#confirm-batch').is_enabled())
         # The second click bypasses the disabled attribute so the handler guards themselves are tested.
         self.act(lambda: self.page.locator('#confirm-batch').evaluate('(button) => { button.click(); button.disabled = false; button.click(); }'),
-                 'POST','/api/onboarding/batches',text='批次已受理')
+                 'POST','/api/onboarding/batches',text='批次已受理',selector='#batch-result')
         self.assert_quiet('POST','/api/onboarding/batches',1)
 
     def test_sensitive_form_values_never_enter_url_or_storage(self):
@@ -779,6 +927,18 @@ class PoolDomTests(unittest.TestCase):
         first = self.act('#pause','POST','/api/onboarding/tasks/' + TID + '/pause',text='事务提交结果未知')
         self.assert_quiet('POST','/api/onboarding/tasks/' + TID + '/pause',1)
         return first
+
+    def test_legacy_live_detail_is_accurate_and_read_only(self):
+        self.overrides[('GET','/api/onboarding/tasks/' + TID)] = (200, dict(
+            TASK, execution_mode='live', synthetic=False, status='RUNNING'))
+        self.start('/onboarding'); self.page.locator('#task-id').fill(TID)
+        self.act('#query','GET','/api/onboarding/tasks/' + TID,text='已取得最新')
+        self.assertIn('真实执行任务', self.page.locator('#task-facts').inner_text())
+        self.assertNotIn('合成执行中', self.page.locator('#task-facts').inner_text())
+        for action in ('pause','cancel','recheck'):
+            self.assertTrue(self.page.locator('#' + action).is_disabled())
+            self.force_click('#' + action)
+            self.assertFalse(self.calls('POST','/api/onboarding/tasks/' + TID + '/' + action))
 
     def test_legacy_unknown_manual_read_cannot_unlock_new_key_command(self):
         first = self.legacy_unknown()
@@ -919,7 +1079,7 @@ class PoolDomTests(unittest.TestCase):
         self.assertTrue(self.page.locator('#reconcile-card').is_hidden())
         self.assertTrue(self.page.locator('#preflight').is_enabled())
         self.act('#preflight','POST','/api/onboarding/preflight')
-        self.act('#confirm-batch','POST','/api/onboarding/batches',text='批次已受理')
+        self.act('#confirm-batch','POST','/api/onboarding/batches',text='批次已受理',selector='#batch-result')
         text = self.page.locator('#message').inner_text()
         self.assertIn('任务列表',text)
         self.assertIn('邮箱列表',text)
@@ -942,6 +1102,7 @@ class PoolDomTests(unittest.TestCase):
     def test_late_mutation_5xx_after_pagehide_cannot_restore_pending(self):
         self.start(); held = []
         self.page.route('**/api/onboarding/mailboxes/' + MID, lambda route: held.append(route))
+        self.page.locator('[data-mailbox-edit]').click()
         self.page.locator('[data-save-group]').click()
         self.until(lambda: held, 'PATCH was not issued')
         self.page.evaluate("window.dispatchEvent(new Event('pagehide'))")
@@ -1049,7 +1210,7 @@ class PoolDomTests(unittest.TestCase):
         self.assertTrue(self.page.locator('[data-save-group]').is_disabled(),'mailbox rows must be refreshed first')
         del self.overrides[('POST','/api/onboarding/batches')]
         self.act('#preflight','POST','/api/onboarding/preflight')
-        again = self.act('#confirm-batch','POST','/api/onboarding/batches',text='批次已受理')
+        again = self.act('#confirm-batch','POST','/api/onboarding/batches',text='批次已受理',selector='#batch-result')
         self.assertNotEqual(again['request_key'],first['request_key'])
 
     def test_only_boolean_proof_on_version_conflict_releases(self):
@@ -1287,3 +1448,158 @@ class PoolDomTests(unittest.TestCase):
         self.import_preview()
         self.act('#confirm-import','POST','/api/onboarding/mailboxes/import',text='已解除')
         self.assertTrue(self.page.locator('#confirm-batch').is_disabled(), 'a preflight observed before the release must not survive it')
+
+    def start_embedded(self):
+        """Keep real pool controls, supplying only the original console's bridge contract."""
+        source = (STATIC / 'onboarding-pools.html').read_text()
+        content = re.search(r'<main\b[^>]*>([\s\S]*?)</main>', source).group(1)
+        helper = '''
+          window.sharedSessionCalls = 0; window.expirationCalls = 0;
+          const sharedSession = fetch('/api/auth/session').then(r => r.json());
+          window.RFProtectedConsole = {
+            session() { window.sharedSessionCalls++; return sharedSession; },
+            expire(error) { window.expirationCalls++; window.dispatchEvent(new CustomEvent('rf:session-expired', {detail:error})); }
+          };
+        '''
+        fixture = ('<!doctype html><html><meta charset="utf-8"><body data-console-mode="protected">'
+                   '<section id="view-onboarding"><span id="operator" hidden></span><button id="logout" hidden></button>'
+                   '<div id="main">' + content + '</div></section><script>' + helper + '</script>'
+                   '<script src="/static/onboarding-pools.js"></script></body></html>')
+        self.page.route('**/embedded', lambda route: route.fulfill(content_type='text/html', body=fixture))
+        self.start('/embedded')
+
+    def navigate_embedded(self, target):
+        self.assertTrue(self.page.evaluate('Boolean(window.RFPoolPanel)'), 'embedded pool navigation bridge missing')
+        return self.page.evaluate('target => window.RFPoolPanel.beforeNavigate(target)', target)
+
+    def test_embedded_boot_uses_only_the_console_shared_session(self):
+        self.start_embedded()
+        self.assertEqual(self.page.evaluate('window.sharedSessionCalls'), 1)
+        self.assertEqual(len(self.calls('GET', '/api/auth/session')), 1)
+        self.assertTrue(self.navigate_embedded('mailboxes'))
+        self.assertEqual(self.page.locator('#mailbox-list tr').count(), 1)
+
+    def test_embedded_navigation_clears_import_only_and_retains_selection_revision_and_task(self):
+        self.start_embedded()
+        self.page.locator('[data-mailbox-select]').check()
+        self.page.locator('#selection').select_option('specified')
+        self.act('[data-open-task]', 'GET', '/api/onboarding/tasks/' + TID)
+        facts = self.page.locator('#task-facts').inner_text()
+        config = self.page.locator('#config-state').inner_text()
+        self.import_preview()
+        count = len(self.requests)
+        self.assertTrue(self.navigate_embedded('mailboxes'))
+        self.assertNotEqual(self.page.locator('#import-text').input_value(), '')
+        self.assertTrue(self.navigate_embedded('google'))
+        self.assertEqual(self.page.locator('#import-text').input_value(), '')
+        self.assertEqual(self.page.locator('#import-preview').inner_text(), '')
+        self.assertEqual(self.page.locator('#tab-list').get_attribute('aria-selected'), 'true')
+        self.assertEqual(self.page.locator('#task-facts').inner_text(), facts)
+        self.assertEqual(self.page.locator('#config-state').inner_text(), config)
+        self.assertTrue(self.page.locator('[data-mailbox-select]').is_checked())
+        self.assertEqual(len(self.requests), count, 'SPA navigation must not recreate/read/write pool state')
+        body = self.act('#preflight', 'POST', '/api/onboarding/preflight')
+        self.assertEqual(body['mailbox_ids'], [MID])
+        self.assertTrue(self.navigate_embedded('settings'))
+        self.assertTrue(self.page.locator('#confirm-batch').is_enabled())
+        body = self.act('#confirm-batch', 'POST', '/api/onboarding/batches')
+        self.assertEqual(body['expected_config_revision'], REV)
+
+    def test_embedded_busy_navigation_does_not_clear_secret_or_change_tab(self):
+        self.start_embedded()
+        self.page.locator('#tab-import').click()
+        secret = 'fixture-ui@example.test----fixture-ui-password'
+        self.page.locator('#import-text').fill(secret)
+        held = []
+        self.page.route('**/api/onboarding/mailboxes/import-preview', lambda route: held.append(route))
+        self.page.locator('#preview-import').click()
+        self.until(lambda: held, 'import preview not issued')
+        for target in ('google', 'cards', 'run', 'mailboxes'):
+            self.assertFalse(self.navigate_embedded(target))
+        self.assertEqual(self.page.locator('#import-text').input_value(), secret)
+        self.assertEqual(self.page.locator('#tab-import').get_attribute('aria-selected'), 'true')
+        held[0].fulfill(status=503, content_type='application/json', body='{}')
+        self.settle()
+        self.assertTrue(self.navigate_embedded('settings'))
+        self.assertEqual(self.page.locator('#import-text').input_value(), '')
+
+    def test_embedded_pending_keeps_original_request_and_blocks_only_leaving_pool_module(self):
+        self.start_embedded()
+        path = '/api/onboarding/batches'
+        self.overrides[('POST', path)] = GATEWAY
+        self.act('#preflight', 'POST', '/api/onboarding/preflight')
+        body = self.act('#confirm-batch', 'POST', path)
+        receipt = self.page.locator('#reconcile-note').inner_text()
+        for target in ('google', 'mailboxes', 'cards', 'settings'):
+            self.assertTrue(self.navigate_embedded(target))
+            self.assertTrue(self.page.locator('#reconcile-card').is_visible())
+            self.assertEqual(self.page.locator('#reconcile-note').inner_text(), receipt)
+        for target in ('run', 'network', 'env', 'assets'):
+            self.assertFalse(self.navigate_embedded(target))
+        self.assertEqual(len(self.calls('POST', path)), 1)
+        self.overrides[('POST', path)] = (409, dict(code='VERSION_CONFLICT'))
+        replay = self.act('#reconcile-request', 'POST', path)
+        self.assertEqual(replay, body)
+        self.assertFalse(self.navigate_embedded('run'), '409 without proof must retain original pending request')
+        self.overrides[('POST', path)] = PROVED
+        replay = self.act('#reconcile-request', 'POST', path)
+        self.assertEqual(replay, body)
+        self.assertTrue(self.navigate_embedded('run'))
+        self.assertTrue(self.page.locator('#reconcile-card').is_hidden())
+
+    def test_embedded_pool_401_expires_shared_shell_without_renewal_or_recursion(self):
+        self.start_embedded()
+        self.import_preview()
+        self.overrides[('GET', '/api/onboarding/tasks')] = (401, dict(code='UNAUTHENTICATED'))
+        self.act('#refresh-tasks', 'GET', '/api/onboarding/tasks')
+        self.assertEqual(self.page.evaluate('window.expirationCalls'), 1)
+        self.assertEqual(self.page.locator('#import-text').input_value(), '')
+        self.assertTrue(self.page.locator('#preflight').is_disabled())
+        self.assertTrue(self.page.locator('#logout').is_disabled())
+        self.assertEqual(len(self.calls('GET', '/api/auth/session')), 1)
+
+    def test_embedded_shell_expiration_clears_pool_and_cannot_resume_writes(self):
+        self.start_embedded()
+        self.import_preview()
+        self.page.evaluate("window.dispatchEvent(new CustomEvent('rf:session-expired', {detail:{status:401}}))")
+        self.assertEqual(self.page.locator('#import-text').input_value(), '')
+        self.assertTrue(self.page.locator('#confirm-import').is_disabled())
+        self.assertTrue(self.page.locator('#preflight').is_disabled())
+        self.assertTrue(self.page.locator('#logout').is_disabled())
+        self.force_click('#preflight')
+        self.assertEqual(len(self.calls('POST', '/api/onboarding/preflight')), 0)
+        self.assertEqual(len(self.calls('GET', '/api/auth/session')), 1)
+
+    def test_embedded_late_reads_cannot_restore_observations_after_shell_expiration(self):
+        marker = 'LATE_POOL_REPLY'
+        cases = [
+            ('mailboxes', '**/api/onboarding/mailboxes?*', '#filter-form button[type="submit"]',
+             dict(items=[dict(MAILBOX, email=marker + '@example.test')], next_cursor=None)),
+            ('tasks', '**/api/onboarding/tasks?*', '#refresh-tasks',
+             dict(items=[dict(TASK, status=marker)], next_cursor=None)),
+            ('config', '**/api/onboarding/config', '#load-config',
+             dict(revision=marker, nonsecret_config=dict(FIELDS, model='fixture-late-reply'))),
+            ('task-detail', '**/api/onboarding/tasks/' + TID, '[data-open-task]', dict(TASK, current_step=marker)),
+            ('preview', '**/api/onboarding/mailboxes/import-preview', '#preview-import',
+             dict(items=[dict(line=1, email=marker + '@example.test', provider='outlook', group_ref='fixture:group')],
+                  issues=[], accepted_count=1, duplicate_count=0, conflict_count=0, preview_digest='a'*64)),
+        ]
+        for name, pattern, trigger, payload in cases:
+            with self.subTest(read=name):
+                self.start_embedded()
+                if name == 'preview':
+                    self.page.locator('#tab-import').click()
+                    self.page.locator('#import-text').fill('fixture-ui@example.test----fixture-ui-password')
+                held = []
+                self.page.route(pattern, lambda route: held.append(route))
+                self.page.locator(trigger).evaluate('button => button.click()')
+                self.until(lambda: held, 'delayed ' + name + ' read not issued')
+                self.page.evaluate("window.dispatchEvent(new CustomEvent('rf:session-expired', {detail:{status:401}}))")
+                held[0].fulfill(status=200, content_type='application/json', body=json.dumps(payload))
+                self.settle()
+                self.page.unroute(pattern)
+                self.assertNotIn(marker, self.page.locator('#main').inner_text())
+                self.assertEqual(self.page.locator('#config-model').input_value(), FIELDS['model'])
+                self.assertEqual(self.page.locator('#import-preview').inner_text(), '')
+                self.assertTrue(self.page.locator('#preflight').is_disabled())
+                self.assertTrue(self.page.locator('#task-facts').is_hidden())

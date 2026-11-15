@@ -12,6 +12,7 @@ import sys
 import threading
 
 from common.file_lock import append_line, file_lock
+from common.managed_mailboxes import management_lock, mailbox_source_root
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -70,8 +71,10 @@ def mark_registration_started(platform, email, password=""):
     normalized_platform = str(platform or "").strip().lower()
     if normalized_platform in {"", "email", "outlook"}:
         return
-    _exclude_from_outlook_sale(normalized_platform, email)
-    append_line(_used_file(normalized_platform), f"{email}----{password}----reserved")
+    with management_lock(mailbox_source_root(EMAILS_FILE)) as boundary:
+        boundary.record_legacy_use(email)
+        _exclude_from_outlook_sale(normalized_platform, email)
+        append_line(_used_file(normalized_platform), f"{email}----{password}----reserved")
 
 
 def _load_used(platform):
@@ -95,7 +98,8 @@ def _load_used(platform):
 def next_email(platform):
     """取下一个未被该平台占用的邮箱，返回 (email, password, refresh_token, client_id) 或 None。
     取出即标记 reserved，防止并发重复。"""
-    with _lock, file_lock(f"{EMAILS_FILE}.{platform}.reserve"):
+    with management_lock(mailbox_source_root(EMAILS_FILE)) as boundary, \
+            _lock, file_lock(f"{EMAILS_FILE}.{platform}.reserve"):
         if not os.path.exists(EMAILS_FILE):
             print(f"  [email] {EMAILS_FILE} not found")
             return None
@@ -107,11 +111,12 @@ def next_email(platform):
                     continue
                 parts = line.split("----")
                 email = parts[0].strip()
-                if email.lower() in used:
+                if boundary.is_managed(email) or email.lower() in used:
                     continue
                 password = parts[1].strip() if len(parts) >= 2 else ""
                 token = parts[2].strip() if len(parts) >= 3 else ""
                 client_id = parts[3].strip() if len(parts) >= 4 else ""
+                boundary.record_legacy_use(email)
                 append_line(_used_file(platform), f"{email}----{password}----reserved")
                 _exclude_from_outlook_sale(platform, email)
                 print(f"  [email] picked for {platform}: {email}")
@@ -122,7 +127,8 @@ def next_email(platform):
 
 def latest_email(platform, require_token=False, validate_token=False):
     """Reserve the newest unused mailbox, optionally requiring a working Graph RT."""
-    with _lock, file_lock(f"{EMAILS_FILE}.{platform}.reserve"):
+    with management_lock(mailbox_source_root(EMAILS_FILE)) as boundary, \
+            _lock, file_lock(f"{EMAILS_FILE}.{platform}.reserve"):
         if not os.path.exists(EMAILS_FILE):
             print(f"  [email] {EMAILS_FILE} not found")
             return None
@@ -132,7 +138,7 @@ def latest_email(platform, require_token=False, validate_token=False):
         for line in reversed(lines):
             parts = line.split("----")
             email = parts[0].strip()
-            if email.lower() in used:
+            if boundary.is_managed(email) or email.lower() in used:
                 continue
             password = parts[1].strip() if len(parts) >= 2 else ""
             token = parts[2].strip() if len(parts) >= 3 else ""
@@ -140,6 +146,9 @@ def latest_email(platform, require_token=False, validate_token=False):
             if require_token and (not token or not client_id):
                 continue
             if validate_token:
+                # A provider request may outlive a crashed process. Persist
+                # legacy exposure before it, not only before returning secrets.
+                boundary.record_legacy_use(email)
                 from common.mailbox import check_mailbox_access
                 validation = check_mailbox_access(email, token, client_id) if token else {
                     "ok": False, "permanent": True, "reason": "missing_refresh_token"
@@ -159,6 +168,7 @@ def latest_email(platform, require_token=False, validate_token=False):
                 )
                 if folder_log:
                     print(f"  [email] Graph mailbox readable: {email} ({folder_log})")
+            boundary.record_legacy_use(email)
             append_line(_used_file(platform), f"{email}----{password}----reserved")
             _exclude_from_outlook_sale(platform, email)
             print(f"  [email] picked latest for {platform}: {email} (rt={'yes' if token else 'no'})")
@@ -179,7 +189,8 @@ def retryable_email(platform, require_token=False, validate_token=False):
     normalized_platform = str(platform or "").strip().lower()
     if normalized_platform != "chatgpt":
         return None
-    with _lock, file_lock(f"{EMAILS_FILE}.{platform}.retry"):
+    with management_lock(mailbox_source_root(EMAILS_FILE)) as boundary, \
+            _lock, file_lock(f"{EMAILS_FILE}.{platform}.retry"):
         if not os.path.exists(EMAILS_FILE):
             return None
         used_path = _used_file(platform)
@@ -224,7 +235,7 @@ def retryable_email(platform, require_token=False, validate_token=False):
         from common.mailbox import check_mailbox_access
         retry_claim = _retry_claim_status()
         for email in reversed(retry_candidates):
-            if latest_status.get(email) in {"ok", retry_claim}:
+            if boundary.is_managed(email) or latest_status.get(email) in {"ok", retry_claim}:
                 continue
             record = records.get(email)
             if not record:
@@ -236,6 +247,9 @@ def retryable_email(platform, require_token=False, validate_token=False):
             if require_token and (not token or not client_id):
                 continue
             if validate_token:
+                # A provider request may outlive a crashed process. Persist
+                # legacy exposure before it, not only before returning secrets.
+                boundary.record_legacy_use(email)
                 validation = check_mailbox_access(email, token, client_id) if token else {
                     "ok": False, "permanent": True, "reason": "missing_refresh_token"
                 }
@@ -246,6 +260,7 @@ def retryable_email(platform, require_token=False, validate_token=False):
                             f"{email}----{password}----{validation.get('reason') or 'refresh_token_unusable'}",
                         )
                     continue
+            boundary.record_legacy_use(email)
             append_line(used_path, f"{email}----{password}----{retry_claim}")
             _exclude_from_outlook_sale(platform, email)
             print(f"  [email] retrying failed ChatGPT mailbox: {email}")
@@ -254,10 +269,14 @@ def retryable_email(platform, require_token=False, validate_token=False):
 
 
 def mark_used(platform, email, password=""):
-    append_line(_used_file(platform), f"{email}----{password}----ok")
-    _exclude_from_outlook_sale(platform, email)
+    with management_lock(mailbox_source_root(EMAILS_FILE)) as boundary:
+        boundary.record_legacy_use(email)
+        append_line(_used_file(platform), f"{email}----{password}----ok")
+        _exclude_from_outlook_sale(platform, email)
 
 
 def mark_error(platform, email, password="", reason=""):
-    append_line(_error_file(platform), f"{email}----{password}----{reason}")
-    _exclude_from_outlook_sale(platform, email)
+    with management_lock(mailbox_source_root(EMAILS_FILE)) as boundary:
+        boundary.record_legacy_use(email)
+        append_line(_error_file(platform), f"{email}----{password}----{reason}")
+        _exclude_from_outlook_sale(platform, email)

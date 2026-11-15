@@ -14,7 +14,7 @@
 2. `security.create_operator/update_operator` 仅可信本机维护原语，不是自助提权 API。权限/禁用变更递增 auth_epoch，使旧会话失效；本轮没有公开重置密码端点。
 3. 固定 scrypt N=131072,r=8,p=1，16 字节随机 salt；密码 12–1024 UTF-8 字节。未知/错误/禁用账号走同成本校验和统一认证失败码。
 4. 登录前置票据 10 分钟、一次性、摘要入库；必须精确 HTTPS Origin 与 CSRF。登录失败计数与审计先确认提交，再返回失败。用户名、可信连接 IP 各 4096 桶，每桶 15 分钟窗口最多 5 次失败；hash 碰撞和共享 IP 可能保守限流。前置票据最多 4096 行，复用已用/到期行。
-5. 会话随机令牌只存 SHA256，8 小时绝对上限、30 分钟闲置；登录旋转自己的旧会话；退出撤销；每次危险操作重查当前权限、禁用、会话与认证代次，不信 Actor.permissions 快照。
+5. 会话随机令牌只存 SHA256。2026-09-29 经用户批准，新会话改为固定 30 天，取消独立闲置截止且不滑动续期；原 8 小时 / 30 分钟策略已被替代，旧会话不自动延长，详见 [30 天会话变更](onboarding-session-30days.md)；登录旋转自己的旧会话；退出撤销；每次危险操作重查当前权限、禁用、会话与认证代次，不信 Actor.permissions 快照。
 6. `SecretStore(Keyring(...))` 只接收合成 bytes，owner 策略精确绑定操作者；AES-256-GCM 随机 12 字节 nonce，AAD 为 schema/id/kind/revision。密文/AAD/密钥异常失败关闭，不退回明文。
 7. 密钥只能从既定隔离目录 `BASE/keyrings/fixture-<32hex>/<version>.key` 读取；目录 0700、文件 0600、当前 OS 用户、常规单硬链接文件、32 字节，路径逐层拒绝符号链接。没有环境变量密钥 fallback。
 8. `rotate` 为逐对象 CAS 重加密原语，保持业务 revision，只推进行 version；新 key 通过显式 Keyring.active_version 配置，旧 key 仍可读取且不会自动删除。没有全库扫描、全局切换协调、生产备份恢复工具。丢失 key 不能凭空恢复。

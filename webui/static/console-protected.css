@@ -1,0 +1,37 @@
+/* Scoped adapter: the original shell and local/off mode remain unchanged. */
+body[data-console-mode="protected"] [hidden] { display: none !important; }
+body[data-console-mode="protected"] .console-status { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 8px 0; overflow-wrap: anywhere; }
+body[data-console-mode="protected"] .console-status a { color: var(--accent); }
+body[data-console-mode="protected"] #console-message { border-left: 2px solid var(--amber); padding-left: 10px; }
+body[data-console-mode="protected"] .console-account { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+body[data-console-mode="protected"] #console-actor { font-size: 12px; overflow-wrap: anywhere; max-width: 180px; }
+body[data-console-mode="protected"] #console-logout { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); padding: 6px 10px; cursor: pointer; }
+body[data-console-mode="protected"] .sidebar { overflow-y: auto; }
+body[data-console-mode="protected"] .sidebar > * { flex-shrink: 0; }
+/* Keep tools above the footer; only the task list consumes and scrolls the spare height. */
+body[data-console-mode="protected"] .script-nav { flex: 1 1 auto; overflow-y: auto; min-height: 80px; }
+body[data-console-mode="protected"] .sidebar-footer { margin-top: 0; }
+body[data-console-mode="protected"] input:disabled,
+body[data-console-mode="protected"] select:disabled,
+body[data-console-mode="protected"] textarea:disabled { opacity: .8; cursor: not-allowed; }
+body[data-console-mode="protected"] #view-plus { flex-wrap: nowrap; }
+body[data-console-mode="protected"] #view-plus > .console-status { flex: 0 0 auto; }
+body[data-console-mode="protected"] #view-onboarding { min-width: 0; }
+body[data-console-mode="protected"] #view-onboarding #main { min-width: 0; }
+@media (max-width: 760px) {
+  body[data-console-mode="protected"] { grid-template-rows: auto minmax(0, 1fr); }
+  body[data-console-mode="protected"] .topbar { flex-wrap: wrap; height: auto; min-height: 64px; gap: 6px; padding-top: 8px; padding-bottom: 8px; }
+  body[data-console-mode="protected"] .top-actions { flex-wrap: wrap; gap: 6px; }
+  body[data-console-mode="protected"] #console-actor { max-width: 125px; }
+}
+
+/* Shared settings navigation; original env and Google forms keep their own saves. */
+body[data-console-mode="protected"] :is(#settings-header,#resources-header){margin:0 0 18px;min-width:0}
+body[data-console-mode="protected"] :is(#settings-header,#resources-header) h1{font-size:20px;margin:0 0 14px}
+body[data-console-mode="protected"] :is(.settings-tabs,.resource-tabs){display:flex;flex-wrap:wrap;gap:8px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+body[data-console-mode="protected"] :is(.settings-tabs,.resource-tabs) button{min-height:40px;padding:8px 14px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--muted);cursor:pointer}
+body[data-console-mode="protected"] :is(.settings-tabs,.resource-tabs) button[aria-selected="true"]{background:var(--accent-soft);border-color:var(--accent);color:#9fc2ff}
+body[data-console-mode="protected"] :is(.settings-tabs,.resource-tabs) button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media(max-width:500px){body[data-console-mode="protected"] :is(.settings-tabs,.resource-tabs) button{flex:1;min-height:44px}}
+
+@media(max-width:500px){body[data-console-mode="protected"] .resource-tabs button{flex:1 1 calc(50% - 8px)}}

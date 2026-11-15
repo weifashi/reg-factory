@@ -45,7 +45,7 @@ if _ONBOARDING_MODE not in {"off", "protected"}:
     raise RuntimeError("INVALID_ONBOARDING_MODE")
 _PROTECTED_MODE = _ONBOARDING_MODE == "protected"
 _ONBOARDING_POOL_MODE = BOOT_ENV.get("ONBOARDING_POOL_MODE", "off")
-if _ONBOARDING_POOL_MODE not in {"off", "synthetic"}:
+if _ONBOARDING_POOL_MODE not in {"off", "synthetic", "live"} or (_ONBOARDING_POOL_MODE == "live" and not _PROTECTED_MODE):
     raise RuntimeError("INVALID_ONBOARDING_POOL_MODE")
 
 # 项目根 = webui 的上一级
@@ -2722,6 +2722,14 @@ async def api_gopay_payment_otp(job_id: str, request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
+    if _PROTECTED_MODE and _ONBOARDING_POOL_MODE in {"synthetic", "live"}:
+        if not _onboarding_config.pool_ready:
+            return _protected_error("DEPENDENCY_UNAVAILABLE")
+        from webui.onboarding_console import render_console
+        with open(os.path.join(WEBUI, "static", "index.html"), encoding="utf-8") as stream:
+            source = stream.read()
+        with open(os.path.join(WEBUI, "static", "onboarding-pools.html"), encoding="utf-8") as stream:
+            return render_console(source, pool_source=stream.read(), pool_mode=_ONBOARDING_POOL_MODE)[0]
     page = "onboarding.html" if _PROTECTED_MODE else "index.html"
     with open(os.path.join(WEBUI, "static", page), encoding="utf-8") as stream:
         return stream.read()
@@ -3897,13 +3905,17 @@ if _PROTECTED_MODE:
         with open(os.path.join(WEBUI, "static", "onboarding-login.html"), encoding="utf-8") as stream:
             return stream.read()
 
-    app.add_api_route("/onboarding", index, methods=["GET"], response_class=HTMLResponse)
+    def onboarding_diagnostics_page():
+        with open(os.path.join(WEBUI, "static", "onboarding.html"), encoding="utf-8") as stream:
+            return stream.read()
+
+    app.add_api_route("/onboarding", onboarding_diagnostics_page, methods=["GET"], response_class=HTMLResponse)
 
     from webui.onboarding_auth import install as _install_onboarding
     from webui.onboarding_routes import register_routes as _register_onboarding_routes
 
     _pool_keyring = _pool_mac = None
-    if _ONBOARDING_POOL_MODE == "synthetic":
+    if _ONBOARDING_POOL_MODE in {"synthetic", "live"}:
         try:
             from onboarding.keyring import Keyring as _PoolKeyring
             from onboarding.request_mac import RequestMac as _PoolRequestMac
@@ -3922,11 +3934,14 @@ if _PROTECTED_MODE:
         expected_origin=BOOT_ENV.get("ONBOARDING_ORIGIN"),
         settings_path=BOOT_ENV.get("ONBOARDING_SETTINGS_FILE"),
         pool_mode=_ONBOARDING_POOL_MODE, pool_keyring=_pool_keyring, pool_mac=_pool_mac,
+        live_binding_path=BOOT_ENV.get("ONBOARDING_LIVE_BINDING_FILE"),
     )
     _register_onboarding_routes(app, _onboarding_config)
     if _onboarding_config.pool_ready:
         from webui.onboarding_pool_routes import register_routes as _register_pool_routes
         _register_pool_routes(app, _onboarding_config)
+        from webui.onboarding_console import register_routes as _register_console_routes
+        _register_console_routes(app, _onboarding_config, os.path.join(WEBUI, "static"), schema)
 
 
 # Exact protected asset handlers must run before the legacy directory mount.

@@ -3,6 +3,7 @@
   const $ = selector => document.querySelector(selector);
   let csrf = '', permissions = new Set(), task = null, busy = false, pendingCommand = null, inactive = false;
   const actionIds = ['pause','cancel','recheck'];
+  const readOnlyTask = value => value.execution_mode === 'live' || value.execution_scope === 'pool' && !Object.hasOwn(value,'execution_mode');
   function message(text, error = true) {
     $('#message').textContent = text; $('#message').className = 'message ' + (error ? 'error' : 'success');
     $('#message').hidden = false;
@@ -11,7 +12,7 @@
     $('#refresh').disabled = busy || !csrf || !permissions.has('onboarding:read');
     $('#query').disabled = busy || !csrf || !permissions.has('onboarding:read');
     $('#logout').disabled = busy || !csrf;
-    for (const id of actionIds) $('#' + id).disabled = busy || !csrf || !task || Boolean(pendingCommand) || !permissions.has('tasks:manage');
+    for (const id of actionIds) $('#' + id).disabled = busy || !csrf || !task || readOnlyTask(task) || Boolean(pendingCommand) || !permissions.has('tasks:manage');
     $('#reconcile-command').hidden = !pendingCommand;
     $('#reconcile-command').disabled = busy || !csrf || !pendingCommand || !permissions.has('tasks:manage');
     $('#main').setAttribute('aria-busy', busy ? 'true' : 'false');
@@ -53,14 +54,20 @@
   }
   function renderTask(value) {
     // Spec §6.6: an unsafe or malformed version must never become an expected_version.
-    if (!value || typeof value.id !== 'string' || !Number.isSafeInteger(value.version) || value.version < 1) {
+    const legacy = value && !Object.hasOwn(value,'execution_mode') && value.synthetic === true &&
+      (value.execution_scope === undefined || ['pool','fixture'].includes(value.execution_scope));
+    const modeValid = value && ['synthetic','live'].includes(value.execution_mode) &&
+      value.synthetic === (value.execution_mode === 'synthetic') && (value.execution_mode !== 'live' || value.execution_scope === 'pool');
+    if (!value || typeof value.id !== 'string' || !Number.isSafeInteger(value.version) || value.version < 1 || !(legacy || modeValid)) {
       task = null; $('#task-facts').hidden = true; $('#task-empty').hidden = false;
       $('#task-empty').textContent = '任务响应无效或版本超出安全范围；不能据此发送命令。';
       controls(); return false;
     }
     task = value; $('#task-empty').hidden = true; $('#task-facts').hidden = false; $('#task-facts').replaceChildren();
-    const states = {QUEUED:'排队中',RUNNING:'合成执行中',PAUSED:'已暂停',CANCELLED_SAFE:'已安全取消',SUCCEEDED:'合成任务完成',WAIT_HUMAN:'等待人工',CONFLICT:'结果冲突'};
-    for (const [label, content] of [['任务 ID',value.id],['当前状态',states[value.status] || value.status],['当前版本',value.version],['当前步骤',value.current_step || '尚未开始'],['取消请求',value.cancel_requested ? '已记录' : '无']]) {
+    const live = value.execution_mode === 'live';
+    const unknown = !live && readOnlyTask(value);
+    const states = {QUEUED:'排队中',RUNNING:live || unknown ? '执行中' : '合成执行中',PAUSED:'已暂停',CANCELLED_SAFE:'已安全取消',SUCCEEDED:live || unknown ? '任务完成' : '合成任务完成',WAIT_HUMAN:'等待人工',CONFLICT:'结果冲突'};
+    for (const [label, content] of [['任务 ID',value.id],['类型',unknown ? '历史任务（执行类型未核实，只读）' : live ? '真实执行任务（当前页面只读）' : '任务编排'],['当前状态',states[value.status] || value.status],['当前版本',value.version],['当前步骤',value.current_step || '尚未开始'],['取消请求',value.cancel_requested ? '已记录' : '无']]) {
       const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = label; dd.textContent = String(content); $('#task-facts').append(dt, dd);
     }
     controls();
@@ -80,7 +87,7 @@
     event.preventDefault(); if (busy || !csrf) return;
     task = null; busy = true; controls();
     try {
-      if (renderTask(await api('/api/onboarding/tasks/' + encodeURIComponent($('#task-id').value.trim())))) message('已取得最新合成任务状态。', false);
+      if (renderTask(await api('/api/onboarding/tasks/' + encodeURIComponent($('#task-id').value.trim())))) message('已取得最新任务状态。', false);
       else message('任务响应无效或版本超出安全范围，未显示；不能据此发送命令，请稍后重新查询。');
     }
     catch (error) { $('#task-facts').hidden = true; $('#task-empty').hidden = false; fail(error); }
@@ -131,7 +138,7 @@
     } finally { busy = false; controls(); }
   }
   for (const action of actionIds) $('#' + action).addEventListener('click', async () => {
-    if (busy || !task || !csrf || pendingCommand || !permissions.has('tasks:manage')) return;
+    if (busy || !task || readOnlyTask(task) || !csrf || pendingCommand || !permissions.has('tasks:manage')) return;
     if (action === 'cancel' && !window.confirm('仅取消后续步骤，不回滚外部结果。确认继续？')) return;
     await submitCommand({id:task.id,action,
       body:{expected_version:task.version,request_key:crypto.randomUUID()}});

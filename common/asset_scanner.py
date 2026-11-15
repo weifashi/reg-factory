@@ -14,6 +14,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from functools import wraps
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable
@@ -21,6 +22,7 @@ from typing import Callable
 import requests
 
 from common import asset_store
+from common.managed_mailboxes import MailboxBoundaryError
 
 
 PLATFORMS = ("outlook", "chatgpt", "claude", "grok", "kiro")
@@ -488,6 +490,26 @@ def _platform_preflight(platform: str, timeout: int) -> dict | None:
         }
 
 
+
+def _record_legacy_scan(record):
+    # Inventory/report reads are not consumption. Recheck the actual account
+    # immediately before provider work, including stale in-memory inventories.
+    email = record.get("email")
+    if not email:
+        raise MailboxBoundaryError()
+    asset_store._record_legacy_delivery(email)
+
+
+def _legacy_scan(function):
+    @wraps(function)
+    def guarded(record, *args, **kwargs):
+        _record_legacy_scan(record)
+        # The durable exposure now prevents later adoption. Release the shared
+        # selection lock before network I/O so unrelated scans stay concurrent.
+        return function(record, *args, **kwargs)
+    return guarded
+
+@_legacy_scan
 def _scan_outlook(record: dict, timeout: int) -> dict:
     mailbox = record.get("_mailbox") or {}
     refresh_token = str(mailbox.get("refresh_token") or "").strip()
@@ -572,6 +594,7 @@ def _scan_outlook(record: dict, timeout: int) -> dict:
     return {"status": "unknown", "detail": f"Microsoft OAuth HTTP {response.status_code}", "evidence": f"microsoft_oauth:{response.status_code}"}
 
 
+@_legacy_scan
 def _scan_chatgpt(record: dict, timeout: int) -> dict:
     cookies = record.get("_cookies") or []
     if cookies:
@@ -847,6 +870,7 @@ def _discount_percentage(payload):
     return None
 
 
+@_legacy_scan
 def _scan_chatgpt_plus_trial(record: dict, access_token: str, timeout: int) -> dict:
     """Check trial eligibility through ChatGPT's authoritative accounts API."""
     enabled = str(os.environ.get("ASSET_SCAN_CHATGPT_PLUS_TRIAL", "true")).strip().lower()
@@ -993,6 +1017,7 @@ def _scan_chatgpt_plus_trial(record: dict, access_token: str, timeout: int) -> d
     }
 
 
+@_legacy_scan
 def _scan_chatgpt_coupon_trial(record: dict, access_token: str, timeout: int) -> dict:
     enabled = str(os.environ.get("ASSET_SCAN_CHATGPT_PLUS_TRIAL", "true")).strip().lower()
     if enabled in {"0", "false", "no", "off"}:
@@ -1131,6 +1156,7 @@ def check_chatgpt_plus_trial_for_session(
         "email": address,
         "_token": data,
     }
+    _record_legacy_scan(record)
     started = time.monotonic()
     try:
         outcome = _scan_chatgpt_plus_trial(record, token, int(timeout))
@@ -1239,6 +1265,7 @@ def _claude_plan_type(payload: dict) -> str:
     return "unknown"
 
 
+@_legacy_scan
 def _scan_claude(record: dict, timeout: int) -> dict:
     cookies = record.get("_cookies") or []
     token = record.get("_token") or {}
@@ -1317,6 +1344,7 @@ def _grok_authorization_status(record: dict) -> str:
     return "unverified"
 
 
+@_legacy_scan
 def _scan_grok(record: dict, timeout: int) -> dict:
     cookies = record.get("_cookies") or []
     token = record.get("_token") or {}
@@ -1374,6 +1402,7 @@ def _scan_grok(record: dict, timeout: int) -> dict:
     return {"status": "unknown", "detail": f"Grok HTTP {response.status_code}", "evidence": f"xai_account:{response.status_code}"}
 
 
+@_legacy_scan
 def _scan_kiro(record: dict, timeout: int) -> dict:
     token = record.get("_token") or {}
     refresh = str(token.get("refreshToken") or token.get("refresh_token") or "").strip()
@@ -1426,7 +1455,11 @@ def _scan_record(
     started = time.monotonic()
     public = _public_record(record)
     try:
+        _record_legacy_scan(record)
         outcome = _SCANNERS[record["platform"]](record, timeout)
+    except MailboxBoundaryError:
+        outcome = {"status": "error", "detail": "邮箱管理权不允许旧扫描器使用",
+                   "evidence": "ownership:blocked"}
     except requests.Timeout:
         outcome = {"status": "error", "detail": "检测请求超时", "evidence": "network:timeout"}
     except requests.RequestException as exc:

@@ -635,6 +635,7 @@ class AssetScannerTests(unittest.TestCase):
         session.__enter__.return_value = session
         session.__exit__.return_value = False
         record = {
+            "email": "abuse@example.com",
             "_mailbox": {"refresh_token": "rt", "client_id": "client"},
             "_history": None,
         }

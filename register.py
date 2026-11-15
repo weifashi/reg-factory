@@ -19,6 +19,8 @@ import time
 from datetime import datetime
 from urllib.parse import urlsplit
 
+from common.managed_mailboxes import MailboxBoundaryError, mailbox_source_root, management_lock
+
 if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -687,23 +689,27 @@ def read_next_email_from_file():
     线程安全：读取后立即标记为已使用，防止并发取到同一个"""
     from common.file_lock import append_line, file_lock
 
-    with _email_lock, file_lock(f"{EMAILS_USED_FILE}.reserve"):
-        if not os.path.exists(EMAILS_FILE):
+    source = os.path.realpath(EMAILS_FILE)
+    with management_lock(mailbox_source_root(source)) as boundary, \
+            _email_lock, file_lock(f"{EMAILS_USED_FILE}.reserve"):
+        if not os.path.exists(source):
             print(f"  [email-file] {EMAILS_FILE} not found")
             return None
         used = _load_used_emails()
-        with open(EMAILS_FILE, "r", encoding="utf-8") as f:
+        with open(source, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
                 parts = line.split("----")
                 email_addr = parts[0].strip().lower()
-                if email_addr in used:
+                if boundary.is_managed(email_addr) or email_addr in used:
                     continue
                 password = parts[1].strip() if len(parts) >= 2 else ""
                 token = parts[2].strip() if len(parts) >= 3 else ""
                 client_id = parts[3].strip() if len(parts) >= 4 else ""
+                # 先持久化交付边界；失败不得消耗旧领取记录或交付密码。
+                boundary.record_legacy_use(email_addr)
                 # 立即标记为已使用，防止其他线程取到同一个
                 append_line(
                     EMAILS_USED_FILE,
@@ -7098,11 +7104,14 @@ async def main():
                             "index": i, "profile": name, "status": "ERROR", "sk": None
                         })
                     return
-            try:
-                from common.emails import mark_registration_started
-                mark_registration_started("claude", email, email_password)
-            except Exception as exc:
-                print(f"  [email] sale exclusion warning for {email}: {str(exc)[:100]}")
+            if email:
+                try:
+                    from common.emails import mark_registration_started
+                    mark_registration_started("claude", email, email_password)
+                except MailboxBoundaryError:
+                    raise
+                except Exception as exc:
+                    print(f"  [email] sale exclusion warning for {email}: {str(exc)[:100]}")
             try:
                 configured_profile_attempts = int(
                     os.environ.get("CLAUDE_RESIDENTIAL_PROFILE_RETRIES", "3") or 3

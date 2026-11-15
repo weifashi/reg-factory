@@ -13,6 +13,7 @@ def _data_root() -> Path:
     return Path(os.environ.get("REG_FACTORY_DATA_DIR") or Path.cwd()).resolve()
 
 
+@asset_store._mailbox_boundary
 def load_scan_candidates(statuses=("unlock", "expired")) -> list[dict]:
     """Return password-bearing emails.txt records matching cached Outlook statuses."""
     requested = {str(status).strip().lower() for status in statuses if str(status).strip()}
@@ -24,7 +25,8 @@ def load_scan_candidates(statuses=("unlock", "expired")) -> list[dict]:
     }
     candidates = []
     seen = set()
-    for mailbox in asset_store._mailboxes():
+    for mailbox in asset_store._legacy_records(
+            asset_store._mailboxes(), lambda item: item.get("email", "")):
         email = str(mailbox.get("email") or "").strip()
         identity = email.lower()
         if not identity or identity in seen or not mailbox.get("password"):
@@ -39,6 +41,7 @@ def load_scan_candidates(statuses=("unlock", "expired")) -> list[dict]:
             selected = evidence == "local:missing_refresh_token"
         if not selected:
             continue
+        asset_store._record_legacy_delivery(email)
         seen.add(identity)
         candidates.append({
             "email": email,
@@ -84,6 +87,7 @@ def _clear_error_entries(identities: set[str]) -> int:
     return cleared
 
 
+@asset_store._mailbox_boundary
 def upsert_refresh_tokens(results: list[dict]) -> dict:
     """Atomically write recovered RTs to emails.txt and refresh cached asset state."""
     updates = {
@@ -93,6 +97,8 @@ def upsert_refresh_tokens(results: list[dict]) -> dict:
     }
     if not updates:
         return {"updated": 0, "appended": 0, "errors_cleared": 0}
+    for email in updates:
+        asset_store._record_legacy_delivery(email)
 
     path = _data_root() / "emails.txt"
     original = path.read_text(encoding="utf-8", errors="replace").splitlines() if path.is_file() else []

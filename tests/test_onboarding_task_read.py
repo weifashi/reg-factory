@@ -86,11 +86,27 @@ class TaskReadTests(onboarding_pool_support.PoolCase):
         with batches.observe() as queries:
             result = self.detail(batch['task_ids'][0])
         self.assertEqual(set(result), {'id','execution_scope','batch_id','config_id','config_revision','status',
-            'version','reason_code','current_step','generation','cancel_requested','synthetic'})
+            'version','reason_code','current_step','generation','cancel_requested','synthetic','execution_mode'})
         self.assertEqual(result['config_revision'], batch['config_revision'])
         task_lock = next(i for i,(_,q,_) in enumerate(queries) if 'FOR UPDATE OF t' in q)
         session_lock = next(i for i,(_,q,_) in enumerate(queries) if 'FROM operator_sessions' in q)
         self.assertLess(task_lock, session_lock); self.assertEqual(before, self.snapshot())
+
+    def test_live_mode_is_read_from_database_without_promoting_other_tasks(self):
+        from onboarding.migrate import apply_all
+        live = self.create()['task_ids'][0]
+        old = self.create()['task_ids'][0]
+        with self.fixture.migrator() as conn:
+            apply_all(conn, self.fixture.schema, target_version=3)
+        # Disposable fixture only. No production mode conversion entry exists.
+        self.change("UPDATE onboarding_tasks SET execution_mode='live' WHERE id=%s", (live,))
+        before = self.snapshot()
+        self.assertFalse(self.detail(live)['synthetic'])
+        self.assertTrue(self.detail(old)['synthetic'])
+        items = {item['id']: item for item in self.page().items}
+        self.assertFalse(items[live]['synthetic'])
+        self.assertTrue(items[old]['synthetic'])
+        self.assertEqual(before, self.snapshot())
 
     def test_scope_locator_own_fixture_pool_and_tasks_only(self):
         fixture = self.task(); batch = self.create()
@@ -124,7 +140,7 @@ class TaskReadTests(onboarding_pool_support.PoolCase):
         self.reject(lambda:self.page(limit=2,cursor=token),ErrorCode.INVALID_INPUT)
         for item in self.page().items:
             self.assertEqual(set(item), {'id','execution_scope','batch_id','config_id','config_revision','status',
-                'version','reason_code','current_step','generation','cancel_requested','synthetic','created_at'})
+                'version','reason_code','current_step','generation','cancel_requested','synthetic','created_at','execution_mode'})
 
     def test_scope_change_after_locator_not_retried_as_another_service(self):
         batch = self.create(); tid = batch['task_ids'][0]
@@ -245,12 +261,13 @@ class TaskProjectionTests(unittest.TestCase):
         api=importlib.import_module('onboarding.task_read')
         tid,bid,cid,owner=[uuid4() for _ in range(4)]
         row=(tid,'pool',bid,cid,'pool-'+str(uuid4()),'QUEUED',1,None,None,1,False,
-             datetime.now(timezone.utc),'pool',cid,owner)
+             datetime.now(timezone.utc),'pool',cid,owner,'synthetic')
         expected=api._list_dto(row,str(owner))
-        self.assertEqual(set(expected),set(api._PUBLIC)|{'synthetic','created_at'})
+        self.assertEqual(set(expected),set(api._PUBLIC)|{'synthetic','created_at','execution_mode'})
         for index, value in ((0,str(tid)),(1,'real'),(4,'secret:ref'),(5,'BAD'),(6,True),
                              (7,'password=canary'),(8,'secret canary'),(9,0),(10,1),
-                             (11,'infinity'),(12,'fixture'),(13,uuid4()),(14,uuid4())):
+                             (11,'infinity'),(12,'fixture'),(13,uuid4()),(14,uuid4()),
+                             (15,None),(15,True),(15,'real')):
             values=list(row); values[index]=value
             with self.subTest(index=index), self.assertRaises(ServiceError) as caught:
                 api._list_dto(tuple(values),str(owner))

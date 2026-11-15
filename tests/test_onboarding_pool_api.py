@@ -1,5 +1,6 @@
 """Offline ASGI boundary contracts; mocks stop before any database/provider I/O."""
 import inspect
+from pathlib import Path
 import unittest
 from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
@@ -46,6 +47,18 @@ class PoolApiOfflineTests(unittest.TestCase):
             client = stack.enter_context(TestClient(app, base_url=ORIGIN))
             yield client, auth, config
 
+    def test_old_pool_url_serves_the_same_unified_console(self):
+        with self.client() as (client, auth, config):
+            response = client.get('/onboarding/pools')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-console-mode="protected"', response.text)
+        self.assertIn('id="script-nav"', response.text)
+        self.assertIn('id="view-onboarding"', response.text)
+        self.assertEqual(response.text.count('id="mailbox-card"'), 1)
+        self.assertNotIn('src="/static/onboarding-shell.js"', response.text)
+        with self.client(authenticate=False) as (client, auth, config):
+            self.assertEqual(client.get('/onboarding/pools').status_code, 401)
+
     def test_known_synthetic_path_reaches_service(self):
         from onboarding.mailbox_read import Page
         with patch('onboarding.mailbox_read.list_page', return_value=Page((), None)) as service:
@@ -59,7 +72,7 @@ class PoolApiOfflineTests(unittest.TestCase):
     def test_missing_pool_dependencies_known_503_unknown_403(self):
         with self.client(ready=False) as (client, _, config):
             self.assertEqual(client.get('/api/onboarding/mailboxes').status_code, 503)
-            self.assertEqual(client.get('/api/onboarding/cards').status_code, 403)
+            self.assertEqual(client.get('/api/onboarding/cards').status_code, 503)
             self.assertEqual(client.head('/api/onboarding/mailboxes').status_code, 403)
 
     def test_pool_off_does_not_construct_dependencies_or_mount(self):
@@ -73,7 +86,7 @@ class PoolApiOfflineTests(unittest.TestCase):
     def test_unknown_methods_paths_encoded_and_unapproved_assets_fail_closed(self):
         with self.client() as (client, _, config):
             for method, path in [('HEAD','/api/onboarding/mailboxes'), ('OPTIONS','/api/onboarding/config'),
-                    ('GET','/api/onboarding/cards'), ('GET','/api/onboarding/mailboxes/'+ID+'/history'),
+                    ('GET','/api/onboarding/cards/future'), ('GET','/api/onboarding/mailboxes/'+ID+'/history'),
                     ('GET','/static/onboarding-pools.html'), ('GET','/api/onboarding/%6dailboxes'),
                     ('POST','/api/onboarding/tasks/'+ID+'/future')]:
                 self.assertEqual(client.request(method,path,headers=HEADERS).status_code,403,(method,path))
@@ -290,6 +303,8 @@ class PoolApiOfflineTests(unittest.TestCase):
         import sys
         from onboarding_server_support import isolated_server
         from webui.onboarding_pool_routes import register_routes as actual_pool_routes
+        # Load real router dependencies before this test installs composition-only stubs.
+        importlib.import_module('webui.onboarding_card_routes')
         original_spec = importlib.util.spec_from_file_location
 
         def server_spec(name, location, *args, **kwargs):
@@ -324,7 +339,11 @@ class PoolApiOfflineTests(unittest.TestCase):
                         self.assertEqual(response.status_code, 422)
                         self.assertEqual(response.json()['code'], 'INVALID_INPUT')
                     self.assertEqual(client.get('/static/onboarding-pools.js').status_code, 200)
-                    self.assertEqual(client.get('/static/app.js').status_code, 403)
+                    # Original app is now an exact authenticated console asset.
+                    # The isolated static fixture has no copy; unknown assets remain denied.
+                    (Path(server.WEBUI) / 'static' / 'app.js').write_text('// fixture-original-app')
+                    self.assertEqual(client.get('/static/app.js').status_code, 200)
+                    self.assertEqual(client.get('/static/unapproved.js').status_code, 403)
                     self.assertEqual(client.head('/static/onboarding-pools.js').status_code, 403)
 
 
@@ -480,6 +499,29 @@ class PoolApiDatabaseTests(PoolCase):
         fixture=self.task()
         self.assertEqual(self.call('GET','tasks/'+fixture['id'])['id'],fixture['id'])
         self.assertIsInstance(self.call('POST','tasks/'+fixture['id']+'/pause',{'expected_version':1,'request_key':'fixture:old-pause'},202)['task'],dict)
+
+    def test_legacy_config_get_rejects_live_v2_head_without_leaking_payload(self):
+        from onboarding import live_config
+        from onboarding.live_input_vault import LivePoolPolicy
+        from onboarding.migrate import apply_all
+        from test_onboarding_live_config import FIELDS
+        old=self.configured()
+        self.assertEqual(self.call('GET','config')['revision'],old['revision'])
+        with self.fixture.migrator() as conn:
+            apply_all(conn,self.fixture.schema,target_version=4)
+        current=live_config.replace(self.settings,self.actor,old['revision'],FIELDS,
+            'fixture:http-live-config',policy=LivePoolPolicy(self.settings),mac=self.mac)
+        tables=('global_configs','secret_objects','operation_receipts','onboarding_tasks',
+                'onboarding_batches','resource_leases')
+        before={table:self.read('SELECT * FROM '+table+' ORDER BY 1') for table in tables}
+        response=self.call('GET','config',status=403)
+        self.assertEqual(response['code'],'FORBIDDEN')
+        self.assertEqual(set(response),{'code','correlation_id'})
+        for value in (current['config_id'],current['revision'],FIELDS['billing_account'],
+                      FIELDS['google_auth_profile_ref'],FIELDS['instance_ref']):
+            self.assertNotIn(value,str(response))
+        self.assertEqual(before,{table:self.read('SELECT * FROM '+table+' ORDER BY 1')
+                                 for table in tables})
 
     def test_config_only_tasks_only_and_permission_revoked_after_http_auth(self):
         self.configured()

@@ -92,17 +92,19 @@ from onboarding.errors import ErrorCode, ServiceError
 
 
 class SessionTests(B2Case):
-    def test_require_revalidates_database_and_refreshes_bounded_idle(self):
+    def test_require_revalidates_database_without_extending_existing_deadlines(self):
         self.assertTrue(callable(getattr(security, 'require', None)))
         with self.uow() as conn:
             conn.execute("UPDATE operator_sessions SET expires_at=clock_timestamp()+interval '5 minutes', "
                          "idle_expires_at=clock_timestamp()+interval '1 minute' WHERE id=%s", (self.session_id,))
+            before = conn.execute('SELECT expires_at,idle_expires_at FROM operator_sessions WHERE id=%s', (self.session_id,)).fetchone()
             actor = security.require(conn, self.token, 'tasks:manage')
+        self.assertEqual(self.read('SELECT expires_at,idle_expires_at FROM operator_sessions WHERE id=%s', (self.session_id,))[0],before)
         self.assertEqual(actor.operator_id, self.actor.operator_id)
         self.assertEqual(actor.session_id, self.session_id)
         row = self.read('SELECT idle_expires_at=expires_at,version FROM operator_sessions WHERE id=%s',
                         (self.session_id,))[0]
-        self.assertEqual(row, (True, 2))
+        self.assertEqual(row, (False, 2))
         self.assertEqual(self.read("SELECT count(*) FROM audit_events WHERE action='auth.session_touch'")[0][0], 1)
 
     def test_missing_permission_and_forged_snapshot_never_grant_access(self):
@@ -169,7 +171,7 @@ class SessionTests(B2Case):
             security.check_csrf(conn, self.actor, self.csrf, origin=origin, expected_origin=origin)
         self.assertEqual(caught.exception.code, ErrorCode.UNAUTHENTICATED)
 
-    def test_idle_refresh_audit_failure_rolls_back_session_change(self):
+    def test_session_touch_audit_failure_rolls_back_session_change(self):
         self.assertTrue(callable(getattr(security, 'require', None)))
         before = self.read('SELECT idle_expires_at,version FROM operator_sessions WHERE id=%s', (self.session_id,))
         with patch('onboarding.audit.append', side_effect=RuntimeError('fixture fault')) as fail:
@@ -274,6 +276,27 @@ class LoginTests(B2Case):
                               preauth_token=bootstrap.preauth_token, csrf_token=bootstrap.csrf_token,
                               origin=self.origin, expected_origin=self.origin,
                               previous_token=previous_token)
+
+    def test_new_login_is_fixed_thirty_days_without_idle_cutoff(self):
+        result = self.login()
+        session_id = result.actor.session_id
+        expires, idle, remaining = self.read('SELECT expires_at,idle_expires_at,EXTRACT(EPOCH FROM expires_at-clock_timestamp()) FROM operator_sessions WHERE id=%s', (session_id,))[0]
+        self.assertEqual(expires,idle)
+        self.assertGreater(float(remaining),2591990)
+        self.assertLessEqual(float(remaining),2592000)
+        # Model 29 days without activity, without sleeping or touching real sessions.
+        with self.uow() as conn:
+            conn.execute("UPDATE operator_sessions SET expires_at=expires_at-interval '29 days', idle_expires_at=idle_expires_at-interval '29 days', created_at=created_at-interval '29 days', updated_at=updated_at-interval '29 days' WHERE id=%s", (session_id,))
+        before = self.read('SELECT expires_at,idle_expires_at FROM operator_sessions WHERE id=%s', (session_id,))[0]
+        with self.uow() as conn:
+            security.require(conn,result.session_token,'onboarding:read')
+        self.assertEqual(self.read('SELECT expires_at,idle_expires_at FROM operator_sessions WHERE id=%s',(session_id,))[0],before)
+        # The absolute deadline still fails closed; a request cannot revive it.
+        with self.uow() as conn:
+            conn.execute("UPDATE operator_sessions SET expires_at=statement_timestamp()-interval '1 second',idle_expires_at=statement_timestamp()-interval '1 second' WHERE id=%s", (session_id,))
+        with self.assertRaises(ServiceError) as caught,self.uow() as conn:
+            security.require(conn,result.session_token,'onboarding:read')
+        self.assertEqual(caught.exception.code,ErrorCode.UNAUTHENTICATED)
 
     def test_login_persists_only_hashes_and_rotates_own_previous_session(self):
         self.assertTrue(callable(getattr(security, 'login', None)))

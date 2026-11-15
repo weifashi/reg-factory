@@ -272,7 +272,7 @@ class TestCase(PoolCase):
                         self.assertEqual(summary['accepted_version'], 2)
                         events = self.read('SELECT action,outcome_code,correlation_id,before_summary,after_summary '
                                            'FROM audit_events WHERE task_id=%s', (seed['id'],))
-                        self.assertEqual(events, [('task.'+command, 'ACCEPTED', result['receipt_id'],
+                        self.assertEqual(events, [('task.'+command, 'CANCEL_EXECUTION_UNCLEAR' if command == 'cancel' else 'ACCEPTED', result['receipt_id'],
                             {'status': status, 'version': 1}, {'status': expected_status, 'version': 2})])
                         before = self.snapshot()
                         self.assertEqual(self.call(command, seed), result)

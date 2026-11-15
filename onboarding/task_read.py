@@ -8,7 +8,7 @@ import hmac
 import json
 import re
 
-from . import mailbox_read, pool_config, pool_contracts, pool_repository, repository, security, storage
+from . import mailbox_read, migration_catalog, pool_config, pool_contracts, pool_repository, repository, security, storage
 from .errors import ErrorCode, ServiceError
 from .mailbox_read import Page
 from .request_mac import RequestMac
@@ -52,7 +52,21 @@ def locate_scope(settings, actor, task_id, *, policy, permission='onboarding:rea
     return scope
 
 
-def _safe(task):
+def _mode_column(conn):
+    """Only a verified schema 2 has the legacy implicit mode. Never SQL-fallback."""
+    versions = conn.execute('SELECT version,checksum FROM schema_migrations ORDER BY version').fetchall()
+    installed = migration_catalog.validate_applied(versions, minimum=2)
+    return 't.execution_mode' if installed >= 3 else "'synthetic'::text"
+
+
+def _mode(value, scope):
+    if (type(value) is not str or value not in ('synthetic', 'live')
+            or value == 'live' and scope != 'pool'):
+        raise ServiceError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+    return value
+
+
+def _safe(task, execution_mode):
     """Validate the public scalar fields even after the historical graph check."""
     try:
         result = {name: task[name] for name in _PUBLIC}
@@ -73,7 +87,8 @@ def _safe(task):
             value = result[name]
             if value is not None and (type(value) is not str or not pattern.fullmatch(value)):
                 raise ValueError
-        return result | {'synthetic': True}
+        mode = _mode(execution_mode, scope)
+        return result | {'synthetic': mode == 'synthetic', 'execution_mode': mode}
     except (KeyError, ValueError, TypeError, UnicodeError, OverflowError):
         raise ServiceError(ErrorCode.DEPENDENCY_UNAVAILABLE) from None
 
@@ -85,7 +100,11 @@ def read_pool(settings, actor, task_id, *, policy):
     with storage.unit_of_work(settings) as conn:
         # lock_task owns task -> operator/session -> mailbox/state lock order.
         task = pool_repository.lock_task(conn, actor, task_id, permission='onboarding:read', policy=policy)
-        result = _safe(task)
+        mode = conn.execute('SELECT ' + _mode_column(conn) + ' FROM onboarding_tasks t WHERE t.id=%s',
+                            (task_id,)).fetchone()
+        if mode is None:
+            raise ServiceError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        result = _safe(task, mode[0])
         policy._connection(conn)
         security.revalidate(conn, actor, 'onboarding:read')
     return result
@@ -154,7 +173,7 @@ def _decode_list_cursor(token, owner_id, filter_mac, *, mac):
 
 _DATA_SQL = """SELECT t.id,t.execution_scope,t.batch_id,t.config_id,c.revision,t.status,
  t.version,t.reason_code,t.current_step,t.generation,t.cancel_requested,t.created_at,
- c.scope,b.config_id,b.created_by
+ c.scope,b.config_id,b.created_by,{mode}
  FROM onboarding_tasks t JOIN onboarding_batches b ON b.id=t.batch_id
  LEFT JOIN global_configs c ON c.id=t.config_id
  WHERE b.created_by=%(owner)s AND (%(scope)s='all' OR t.execution_scope=%(scope)s)
@@ -164,7 +183,7 @@ _DATA_SQL = """SELECT t.id,t.execution_scope,t.batch_id,t.config_id,c.revision,t
 
 
 def _list_dto(row, owner_id):
-    pool_repository._row(row, 15)
+    pool_repository._row(row, 16)
     task = dict(zip(_PUBLIC, row[:11]))
     for name in ('id', 'batch_id', 'config_id'):
         task[name] = pool_repository._db_uuid(task[name])
@@ -172,7 +191,7 @@ def _list_dto(row, owner_id):
             or pool_repository._db_uuid(row[13]) != task['config_id']
             or pool_repository._db_uuid(row[14]) != owner_id):
         raise ServiceError(ErrorCode.DEPENDENCY_UNAVAILABLE)
-    result = _safe(task)
+    result = _safe(task, row[15])
     result['created_at'] = mailbox_read._utc(pool_config._timestamp(row[11]))
     return result
 
@@ -209,7 +228,7 @@ def list_page(settings, actor, *, scope='all', batch_id=None, cursor=None, limit
         anchor = (None, None) if cursor is None else _decode_list_cursor(cursor, actor.operator_id, digest, mac=mac)
         params = {**filters, 'owner': actor.operator_id, 'anchor_time': anchor[0],
                   'anchor_id': anchor[1], 'fetch_limit': limit + 1}
-        rows = conn.execute(_DATA_SQL, params).fetchall()
+        rows = conn.execute(_DATA_SQL.format(mode=_mode_column(conn)), params).fetchall()
         items = tuple(_list_dto(row, actor.operator_id) for row in rows)
         next_cursor = None
         if len(items) > limit:

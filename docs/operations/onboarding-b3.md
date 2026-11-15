@@ -50,7 +50,7 @@ legacy execution ----------> denied; legacy:admin still cannot execute
 1. 全 ASGI method+path 显式策略：基线 71 组旧方法路径中，68 组禁止旧业务，首页与 GET/POST env 3 组独立保护。新增未知路由不自动继承旧权限；WebSocket 全部关闭。
 2. 匿名仅固定登录页、登录 JS/CSS、bootstrap/login 和 `/healthz`。`healthz` 仅 `{alive:true}`，不是数据库/业务 readiness。
 3. Cookie `__Host-rf_session`、`__Host-rf_csrf`、`__Host-rf_preauth` 都是 Secure / HttpOnly / SameSite=Strict / Path=/ / 无 Domain。csrf cookie 供服务端会话接口核验并返回当前页面内存，数据库仍只存摘要；不放 localStorage/sessionStorage/URL。
-4. 同源安全 GET 可以缺 Origin，但必须精确 HTTPS Host，拒绝跨站 Fetch Metadata、错误 Origin/Referer。危险请求必须明确匹配 Origin、JSON content-type 和 CSRF；重复安全头、重复 cookie、编码路径等保守拒绝。
+4. 同源安全 GET 可以缺 Origin，但必须精确 HTTPS Host。跨站 API/资源和错误 Origin/Referer 仍拒绝；固定 HTML 顶层导航有受限登录落地例外：外站进入管理页固定跳转 `/login`，只有静态登录页可显示，不读取会话或业务数据，详见 [外站导航规则](onboarding-external-navigation.md)。危险请求必须明确匹配 Origin、JSON content-type 和 CSRF；重复安全头（含 Accept/Fetch Mode/Fetch Dest）、重复 cookie、编码路径等保守拒绝。
 5. JSON 限 8192 bytes，拒绝重复键、非对象、NaN/Infinity、非法字段与格式。异常只返回 `{code,correlation_id}`，不返回请求原文、DSN 或第三方异常；唯一例外是 5 条写路由（批次创建、pool 任务命令、邮箱修改、配置保存、邮箱导入）在可证明原请求未提交时，409 VERSION_CONFLICT 额外带 `not_committed: true`，含义与前提见 `onboarding-not-committed-signal.md`。
 6. B2 账户/可信 IP 的 5 次失败 / 15 分钟规则保留统一 401；B3 额外 HTTP 来源桶：bootstrap 30 次/分钟、login 10 次/分钟，成功和失败均计；各最多 4096 桶，共最多 8192，数据库持久，超额 429。共享 IP/哈希碰撞可能保守限流。IP 来自实际连接，不相信伪造转发头。
 7. 认证事务先提交释放锁，再进入 task-first 业务事务；业务操作再次验证，不信前端按钮隐藏或过期 Actor 快照。

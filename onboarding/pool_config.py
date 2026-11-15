@@ -110,7 +110,13 @@ def _project(row):
                 or type(row[3]) is not dict or row[3] != {} or type(row[4]) is not UUID
                 or type(row[6]) is not str or row[6] != 'pool'):
             raise ValueError
-        fields = _fields(row[2])
+        if type(row[2]) is dict and 'schema_version' in row[2]:
+            # One pool head, versioned readers only. Old writes remain strictly
+            # synthetic; live task eligibility is a separate service boundary.
+            from .live_config import _fields as live_fields
+            fields = live_fields(row[2])
+        else:
+            fields = _fields(row[2])
         # Psycopg refuses infinity/out-of-Python-range timestamps on decoding;
         # normalize all accepted finite aware datetimes before public projection.
         created_at = _timestamp(row[5])
@@ -125,6 +131,21 @@ def _current_locked(conn):
     # global_configs only grants SELECT/INSERT: no row lock or ownership filter.
     return _project(conn.execute('SELECT ' + _COLUMNS + ' FROM global_configs '
         "WHERE scope='pool' ORDER BY created_at DESC,id DESC LIMIT 1").fetchone())
+
+
+def _require_synthetic(config):
+    """Versioned projection is not permission to use the legacy task contract.
+
+    Call after decoding the stored envelope, on the pinned revision for history
+    and on the current head for new synthetic work. Validate the complete v1
+    fields, not merely the absence of a live schema tag.
+    """
+    try:
+        if type(config) is not dict:
+            raise ValueError
+        _fields(config['nonsecret_config'])
+    except (ValueError, TypeError, AttributeError, KeyError):
+        raise ServiceError(ErrorCode.FORBIDDEN) from None
 
 
 def get_current(settings, actor, *, policy, permission='onboarding:read'):

@@ -1,4 +1,14 @@
 // reg-factory WebUI 前端逻辑（原生 JS，无构建）
+// Protected mode reuses this catalog/form renderer; legacy execution stays isolated.
+const RF_CONSOLE_PROTECTED = document.body.dataset.consoleMode === 'protected';
+function catalogHtml(value){
+  return RF_CONSOLE_PROTECTED ? escapeHtml(value) : value;
+}
+function protectedRestriction(view='run'){
+  if(!RF_CONSOLE_PROTECTED) return false;
+  window.RFProtectedConsole?.restrict(view);
+  return true;
+}
 let SCRIPTS = [];
 let EMBEDS = [];
 let curRun = null;     // 当前运行 run_id
@@ -54,13 +64,6 @@ function setNavOpen(open){
 $('#btn-nav').onclick = ()=>setNavOpen(!document.body.classList.contains('nav-open'));
 $('#nav-backdrop').onclick = ()=>setNavOpen(false);
 
-const telegramDialog = $('#telegram-dialog');
-$('#btn-telegram').onclick = ()=>telegramDialog.showModal();
-$('#btn-telegram-close').onclick = ()=>telegramDialog.close();
-telegramDialog.onclick = e=>{
-  if(e.target === telegramDialog) telegramDialog.close();
-};
-
 // ---------------------------------------------------------------- 状态灯轮询
 function setUpdateMessage(text, state=''){
   const message = $('#update-message');
@@ -106,6 +109,7 @@ function renderUpdateState(update, version){
 }
 
 async function pollStatus(){
+  if(protectedRestriction()) return;
   const mainStatus = fetch('/api/status', {cache:'no-store'}).then(async response=>{
     const data = await response.json();
     if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
@@ -163,9 +167,10 @@ async function pollStatus(){
     if(updateRequested) setUpdateMessage('面板正在重启，等待重新连接…');
   }
 }
-setInterval(pollStatus, 5000);
+if(!RF_CONSOLE_PROTECTED) setInterval(pollStatus, 5000);
 
 async function startUpdate(){
+  if(protectedRestriction()) return;
   if(updateRequested) return;
   if(!window.confirm('更新会停止当前面板并重启，运行中的任务必须先停止。继续吗？')) return;
   const button = $('#btn-update');
@@ -191,7 +196,11 @@ async function startUpdate(){
 $('#btn-update').onclick = startUpdate;
 
 // ---------------------------------------------------------------- 视图切换
-async function showView(v){
+async function showView(v, options={}){
+  if(RF_CONSOLE_PROTECTED){
+    v=window.RFProtectedConsole.normalized(v);
+    if(!window.RFProtectedConsole.showPanel(v, options)) return false;
+  }
   setNavOpen(false);
   document.body.classList.toggle('k12-active', v==='k12');
   $('#view-run').style.display  = v==='run' ? '' : 'none';
@@ -202,8 +211,9 @@ async function showView(v){
   $('#view-mailpool').style.display = v==='mailpool' ? 'block' : 'none';
   $('#view-k12').style.display = v==='k12' ? 'block' : 'none';
   $('#view-plus').style.display = v==='plus' ? 'flex' : 'none';
-  $$('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.view===v));
-  if(v!=='run' && v!=='embed') $$('.scriptbtn').forEach(b=>b.classList.remove('active'));
+  $$('.navbtn').forEach(b=>b.classList.toggle('active', b.dataset.view===(RF_CONSOLE_PROTECTED ? window.RFProtectedConsole.navigationView(v) : v)));
+  if(v!=='run' && v!=='embed') $$(RF_CONSOLE_PROTECTED ? '.scriptbtn[data-id]' : '.scriptbtn').forEach(b=>b.classList.remove('active'));
+  if(protectedRestriction(v)) return true;
   if(initializedViews.has(v)) return Promise.resolve();
   const loaders = {
     env:loadEnv,
@@ -223,7 +233,7 @@ async function showView(v){
     throw error;
   }
 }
-$$('.navbtn').forEach(b=> b.onclick = ()=> showView(b.dataset.view));
+$$('.navbtn[data-view]').forEach(b=> b.onclick = ()=> showView(b.dataset.view));
 
 // ---------------------------------------------------------------- 网络出口
 function setProxyMode(mode){
@@ -275,6 +285,7 @@ function escapeHtml(value){
 }
 
 async function loadProxyPanel(includeNodes=false){
+  if(protectedRestriction()) return;
   setProxyMessage('读取中…');
   try{
     const response = await fetch(includeNodes ? '/api/proxy?nodes=1' : '/api/proxy');
@@ -343,6 +354,7 @@ function collectProxyConfig(){
 }
 
 async function applyProxyConfig(){
+  if(protectedRestriction()) return;
   const response = await fetch('/api/proxy', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -358,6 +370,7 @@ async function applyProxyConfig(){
 }
 
 async function saveProxy(){
+  if(protectedRestriction()) return;
   const button = $('#btn-save-proxy');
   button.disabled = true; setProxyMessage('正在保存并应用…');
   try{
@@ -370,6 +383,7 @@ async function saveProxy(){
 }
 
 async function rotateProxy(){
+  if(protectedRestriction()) return;
   const button = $('#btn-rotate-proxy');
   button.disabled = true; setProxyMessage('正在切换出口…');
   try{
@@ -389,6 +403,7 @@ async function rotateProxy(){
 }
 
 async function testProxy(){
+  if(protectedRestriction()) return;
   const button = $('#btn-test-proxy');
   const saveButton = $('#btn-save-proxy');
   button.disabled = true; saveButton.disabled = true;
@@ -635,6 +650,7 @@ function renderAssetScan(data){
 }
 
 async function loadAssetScan(progressOnly=false){
+  if(protectedRestriction()) return;
   if(assetScanTimer){ clearTimeout(assetScanTimer); assetScanTimer = null; }
   try{
     const suffix = progressOnly ? '?progress_only=true' : '';
@@ -657,6 +673,7 @@ async function loadAssetScan(progressOnly=false){
 }
 
 async function startAssetScan(all=false){
+  if(protectedRestriction()) return;
   const platform = $('#asset-scan-platform').value;
   const platforms = all || platform === 'all' ? ['outlook','chatgpt','claude','grok','kiro'] : [platform];
   setAssetMessage('#asset-scan-msg', '正在启动扫描…');
@@ -679,6 +696,7 @@ async function startAssetScan(all=false){
 }
 
 async function refreshAssetSummary(quiet=false){
+  if(protectedRestriction()) return;
   if(!quiet) setAssetMessage('#asset-call-msg', '正在读取资产统计…');
   try{
     const response = await fetch('/api/assets/summary', {headers:assetHeaders()});
@@ -690,6 +708,7 @@ async function refreshAssetSummary(quiet=false){
 }
 
 async function loadAssetPanel(){
+  if(protectedRestriction()) return;
   $('#asset-api-base').value = window.location.origin;
   try{
     const data = await (await fetch('/api/env')).json();
@@ -703,6 +722,7 @@ async function loadAssetPanel(){
 }
 
 async function saveAssetKey(){
+  if(protectedRestriction()) return;
   const button = $('#btn-save-asset-key');
   button.disabled = true;
   setAssetMessage('#asset-key-msg', '保存中…');
@@ -718,6 +738,7 @@ async function saveAssetKey(){
 }
 
 async function callAssetApi(){
+  if(protectedRestriction()) return;
   const button = $('#btn-call-asset');
   button.disabled = true;
   setAssetMessage('#asset-call-msg', '正在领取未取用资产…');
@@ -736,6 +757,7 @@ async function callAssetApi(){
 }
 
 async function exportAssetBatch(){
+  if(protectedRestriction()) return;
   const button = $('#btn-export-assets');
   button.disabled = true;
   const request = buildAssetRequest();
@@ -783,6 +805,7 @@ async function exportAssetBatch(){
 }
 
 async function resetAssetCursor(){
+  if(protectedRestriction()) return;
   const button = $('#btn-reset-asset');
   button.disabled = true;
   const request = buildAssetRequest();
@@ -845,6 +868,7 @@ function renderK12Status(status){
 }
 
 async function fetchK12Status(){
+  if(protectedRestriction()) return;
   try{
     const status = await (await fetch('/api/k12/status')).json();
     renderK12Status(status);
@@ -857,6 +881,7 @@ async function fetchK12Status(){
 }
 
 async function startK12Service(){
+  if(protectedRestriction()) return;
   if(k12Starting) return;
   k12Starting = true;
   renderK12Status({alive:false, ready:true, url:k12Url, message:'正在启动 Codex K12 服务'});
@@ -871,6 +896,7 @@ async function startK12Service(){
 }
 
 async function openK12Channel(){
+  if(protectedRestriction()) return;
   const status = await fetchK12Status();
   if(!status.alive && status.ready) await startK12Service();
 }
@@ -881,6 +907,7 @@ $('#btn-k12-retry').onclick = openK12Channel;
 // ---------------------------------------------------------------- GoPay registration, account pool and Midtrans payment
 
 async function gopayApi(path, options={}){
+  if(protectedRestriction()) return;
   const response = await fetch(`/api/gopay${path}`, options);
   const data = await readJsonResponse(response);
   if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
@@ -1010,6 +1037,7 @@ async function loadGopaySms(){
 }
 
 async function loadGopayPanel(){
+  if(protectedRestriction()) return;
   setGopayMessage('gopay-register-message', '读取中…');
   try{
     const status = await gopayApi('/status', {cache:'no-store'});
@@ -1249,6 +1277,7 @@ function renderPlusStatus(status){
 }
 
 async function loadPlusImportStatus(){
+  if(protectedRestriction()) return;
   try{
     const status = await (await fetch('/api/chatgpt-plus/status')).json();
     renderPlusStatus(status);
@@ -1285,11 +1314,13 @@ function renderCustomSmsSummary(pool, summaryId='custom-sms-summary'){
 }
 
 async function loadPlusPanel(){
+  if(protectedRestriction()) return;
   const [status] = await Promise.all([loadPlusImportStatus(), loadPlusProtocolStatus()]);
   return status;
 }
 
 async function loadCustomSmsPool(summaryId='custom-sms-summary'){
+  if(protectedRestriction()) return;
   try{
     const response = await fetch('/api/sms/custom');
     const pool = await readJsonResponse(response);
@@ -1304,6 +1335,7 @@ async function loadCustomSmsPool(summaryId='custom-sms-summary'){
 }
 
 async function importCustomSmsPoolInto(inputId, summaryId, messageId, buttonId, preservePlusState=false){
+  if(protectedRestriction()) return;
   const input = $(`#${inputId}`);
   const text = input.value.trim();
   const message = $(`#${messageId}`);
@@ -1355,6 +1387,7 @@ function setPlusProtocolState(text, kind=''){
 }
 
 async function loadPlusProtocolStatus(){
+  if(protectedRestriction()) return;
   try{
     const response = await fetch('/api/chatgpt-plus/protocol-status', {cache:'no-store'});
     const data = await readJsonResponse(response);
@@ -1487,6 +1520,7 @@ function syncPlusProtocolAction(){
 }
 
 async function startPlusProtocolBatch(emails=[]){
+  if(protectedRestriction()) return;
   if(plusRun) return;
   const operation = $('#plus-protocol-action').value || 'extract';
   const method = $('#plus-protocol-method').selectedOptions[0];
@@ -1592,6 +1626,7 @@ function monitorPlusRun(runId, accepted, kind='import'){
 }
 
 async function startPlusCodexImport(){
+  if(protectedRestriction()) return;
   if(plusRun) return;
   const accounts = $('#plus-account-input').value.trim();
   if(!accounts){ setPlusImportState('请粘贴至少一个 Plus 账号', 'bad'); return; }
@@ -1657,6 +1692,7 @@ async function startPlusCodexImport(){
 }
 
 async function stopPlusCodexImport(){
+  if(protectedRestriction()) return;
   if(!plusRun) return;
   $('#btn-plus-stop').disabled = true;
   try{
@@ -1695,7 +1731,7 @@ $('#btn-plus-payment-apply').onclick = ()=>{
   $('#plus-payment-dialog').close();
 };
 syncPlusProtocolAction();
-loadPlusProtocolStatus();
+if(!RF_CONSOLE_PROTECTED) loadPlusProtocolStatus();
 
 // ---------------------------------------------------------------- 脚本导航
 function appendNavGroup(nav, title, items, renderItem, open=false){
@@ -1703,7 +1739,7 @@ function appendNavGroup(nav, title, items, renderItem, open=false){
   group.className = 'nav-group';
   group.open = open;
   const summary = document.createElement('summary');
-  summary.innerHTML = `<span>${title}</span><span class="nav-count">${items.length}</span>`;
+  summary.innerHTML = `<span>${catalogHtml(title)}</span><span class="nav-count">${items.length}</span>`;
   group.appendChild(summary);
   const body = document.createElement('div');
   body.className = 'nav-group-items';
@@ -1713,25 +1749,26 @@ function appendNavGroup(nav, title, items, renderItem, open=false){
 }
 
 async function loadScripts(){
-  SCRIPTS = (await (await fetch('/api/scripts')).json()).scripts;
+  const catalog = RF_CONSOLE_PROTECTED ? await window.RFProtectedConsole.catalog() : null;
+  SCRIPTS = catalog ? catalog.scripts : (await (await fetch('/api/scripts')).json()).scripts;
   const nav = $('#script-nav');
   const cats = {};
   SCRIPTS.forEach(s => (cats[s.category]=cats[s.category]||[]).push(s));
   nav.innerHTML = '';
-  $('#task-count').textContent = SCRIPTS.length;
+  $('#task-count').textContent = SCRIPTS.length + (RF_CONSOLE_PROTECTED ? 1 : 0);
 
   let catIndex = 0;
   for(const cat of Object.keys(cats)){
     appendNavGroup(nav, cat, cats[cat], s=>{
       const b=document.createElement('button');
       b.className='scriptbtn'; b.textContent=s.title; b.dataset.id=s.id;
-      b.onclick=()=>{ showView('run'); selectScript(s.id); };
+      b.onclick=async()=>{ if(await showView('run') !== false) selectScript(s.id); };
       return b;
     }, catIndex++===0);
   }
 
   try{
-    EMBEDS = (await (await fetch('/api/embeds')).json()).embeds || [];
+    EMBEDS = catalog ? catalog.embeds : (await (await fetch('/api/embeds')).json()).embeds || [];
     if(EMBEDS.length){
       appendNavGroup(nav, '辅助功能', EMBEDS, e=>{
         const b=document.createElement('button');
@@ -1743,7 +1780,7 @@ async function loadScripts(){
   }catch(err){}
 
   try{
-    const links = (await (await fetch('/api/links')).json()).links || [];
+    const links = catalog ? catalog.links : (await (await fetch('/api/links')).json()).links || [];
     if(links.length){
       appendNavGroup(nav, '外部工具', links, l=>{
         const a=document.createElement('a');
@@ -1754,22 +1791,32 @@ async function loadScripts(){
     }
   }catch(e){}
 
+  if(RF_CONSOLE_PROTECTED){
+    const group = [...nav.querySelectorAll('.nav-group')].find(g=>g.querySelector('summary span').textContent==='主流程') || nav.querySelector('.nav-group');
+    if(group){
+      const button=document.createElement('button'); button.className='scriptbtn'; button.dataset.view='google'; button.textContent='Google 开通任务'; button.onclick=()=>showView('google');
+      group.querySelector('.nav-group-items').append(button);
+      group.querySelector('.nav-count').textContent=group.querySelectorAll('button').length;
+    }
+  }
   if(!curSrc && SCRIPTS.length) selectScript(SCRIPTS[0].id);
+  if(RF_CONSOLE_PROTECTED) showView(location.hash.slice(1) || (location.pathname === '/onboarding/pools' ? 'mailboxes' : 'run'), {history:false, initial:true});
 }
 
 function selectScript(id){
   const nextSrc = SCRIPTS.find(s=>s.id===id);
   if(!nextSrc) return;
   const sameScript = curSrc?.id === id;
-  if(curSrc && !sameScript) captureScriptDraft(curSrc);
+  if(!RF_CONSOLE_PROTECTED && curSrc && !sameScript) captureScriptDraft(curSrc);
   curSrc = nextSrc;
   $$('.scriptbtn').forEach(b=>b.classList.toggle('active', b.dataset.id===id));
   const active = $(`.scriptbtn[data-id="${id}"]`);
   if(active?.closest('details')) active.closest('details').open = true;
-  if(!evtSrc) setRunState('idle', '待运行');
+  if(!evtSrc) setRunState('idle', RF_CONSOLE_PROTECTED ? '执行服务尚未接入' : '待运行');
   if(sameScript && $('#form-panel')?.children.length) return;
   renderForm(curSrc);
-  restoreScriptDraft(curSrc);
+  if(!RF_CONSOLE_PROTECTED) restoreScriptDraft(curSrc);
+  else window.RFProtectedConsole?.restrict();
 }
 
 // ---------------------------------------------------------------- 渲染表单
@@ -1781,8 +1828,8 @@ function renderArgField(a){
   const label = a.flag.replace(/^--/,'');
   if(a.type==='bool'){
     f.className='field checkbox';
-    f.innerHTML = `<input type="checkbox" id="f_${label}" ${a.default?'checked':''}>
-      <label for="f_${label}"><span>${label}</span>${a.help?`<small>${a.help}</small>`:''}</label>`;
+    f.innerHTML = `<input type="checkbox" id="f_${catalogHtml(label)}" ${a.default?'checked':''}>
+      <label for="f_${catalogHtml(label)}"><span>${catalogHtml(label)}</span>${a.help?`<small>${catalogHtml(a.help)}</small>`:''}</label>`;
   }else if(a.type==='choice'){
     let displayNames = null;
     if(a.countryNames && typeof Intl.DisplayNames === 'function'){
@@ -1790,20 +1837,20 @@ function renderArgField(a){
     }
     const choiceLabel = c => (a.labels&&a.labels[c])
       || (displayNames && c !== 'auto' ? `${displayNames.of(c)} (${c})` : c);
-    f.innerHTML = `<label for="f_${label}">${label}</label>
-      <select id="f_${label}">${a.choices.map(c=>`<option value="${c}" ${c==a.default?'selected':''}>${choiceLabel(c)}</option>`).join('')}</select>
-      ${a.help?`<div class="fhelp">${a.help}</div>`:''}`;
+    f.innerHTML = `<label for="f_${catalogHtml(label)}">${catalogHtml(label)}</label>
+      <select id="f_${catalogHtml(label)}">${a.choices.map(c=>`<option value="${catalogHtml(c)}" ${c==a.default?'selected':''}>${catalogHtml(choiceLabel(c))}</option>`).join('')}</select>
+      ${a.help?`<div class="fhelp">${catalogHtml(a.help)}</div>`:''}`;
   }else if(a.type==='multi'){
     const def = a.default||[];
     f.classList.add('field-wide');
-    f.innerHTML = `<label>${label}</label>
-      <div class="multi">${a.choices.map(c=>`<label><input type="checkbox" value="${c}" ${def.includes(c)?'checked':''} data-multi="${label}">${c}</label>`).join('')}</div>
-      ${a.help?`<div class="fhelp">${a.help}</div>`:''}`;
+    f.innerHTML = `<label>${catalogHtml(label)}</label>
+      <div class="multi">${a.choices.map(c=>`<label><input type="checkbox" value="${catalogHtml(c)}" ${def.includes(c)?'checked':''} data-multi="${catalogHtml(label)}">${catalogHtml(c)}</label>`).join('')}</div>
+      ${a.help?`<div class="fhelp">${catalogHtml(a.help)}</div>`:''}`;
   }else{
     const t = a.type==='int' ? 'number' : 'text';
-    f.innerHTML = `<label for="f_${label}">${label}</label>
-      <input type="${t}" id="f_${label}" value="${a.default!==undefined&&a.default!==''?a.default:''}" placeholder="${a.help||''}">
-      ${a.help?`<div class="fhelp">${a.help}</div>`:''}`;
+    f.innerHTML = `<label for="f_${catalogHtml(label)}">${catalogHtml(label)}</label>
+      <input type="${t}" id="f_${catalogHtml(label)}" value="${catalogHtml(a.default!==undefined&&a.default!==''?a.default:'')}" placeholder="${catalogHtml(a.help||'')}">
+      ${a.help?`<div class="fhelp">${catalogHtml(a.help)}</div>`:''}`;
   }
   return f;
 }
@@ -1813,7 +1860,7 @@ function renderForm(s){
   p.innerHTML = '';
   const h = document.createElement('div');
   h.className = 'form-head';
-  h.innerHTML = `<div><span class="form-eyebrow">${s.category}</span><h1 class="form-title">${s.title}</h1></div><p class="form-desc">${s.desc||''}</p>`;
+  h.innerHTML = `<div><span class="form-eyebrow">${catalogHtml(s.category)}</span><h1 class="form-title">${catalogHtml(s.title)}</h1></div><p class="form-desc">${catalogHtml(s.desc||'')}</p>`;
   p.appendChild(h);
   if(s.warning){
     const warning = document.createElement('div');
@@ -1958,6 +2005,7 @@ function setRunState(state, label){
 }
 
 async function runScript(){
+  if(protectedRestriction()) return;
   if(curRun && evtSrc){ evtSrc.close(); evtSrc = null; }
   const args = collectArgs(curSrc);
   const selectedPlatforms = Array.isArray(args['--platforms'])
@@ -2022,6 +2070,7 @@ async function runScript(){
 }
 
 $('#btn-stop').onclick = async ()=>{
+  if(protectedRestriction()) return;
   if(!curRun) return;
   setRunState('stopped', '停止中');
   await fetch(`/api/stop/${curRun}`,{method:'POST'});
@@ -2029,6 +2078,7 @@ $('#btn-stop').onclick = async ()=>{
 };
 
 $('#btn-stop-all').onclick = async ()=>{
+  if(protectedRestriction()) return;
   if(!confirm('确定停止本项目的全部注册任务吗？')) return;
   const btn = $('#btn-stop-all');
   const original = btn.innerHTML;
@@ -2063,6 +2113,7 @@ function envControlValue(control){
 }
 
 async function loadEnv(){
+  if(protectedRestriction()) return;
   const data = await (await fetch('/api/env')).json();
   const wrap = $('#env-groups'); wrap.innerHTML='';
   data.groups.forEach(g=>{
@@ -2203,6 +2254,7 @@ async function loadEnv(){
 
 // 连通测试：把当前页面所有 .env 输入(含未保存的)一起发过去，用最新值测
 async function runTest(target, btn){
+  if(protectedRestriction()) return;
   const env = {};
   $$('input[data-env],select[data-env]').forEach(i=>{
     const value = envControlValue(i);
@@ -2225,6 +2277,7 @@ async function runTest(target, btn){
 }
 
 $('#btn-save-env').onclick = async ()=>{
+  if(protectedRestriction()) return;
   const env = {};
   $$('input[data-env],select[data-env]').forEach(i=>{ env[i.dataset.env] = envControlValue(i); });
   const r = await (await fetch('/api/env',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -2238,6 +2291,7 @@ $('#btn-save-env').onclick = async ()=>{
 
 // ---------------------------------------------------------------- 内嵌页 + 接码助手
 function openEmbed(id){
+  if(protectedRestriction('embed')) return;
   const e = EMBEDS.find(x=>x.id===id);
   if(!e) return;
   showView('embed');
@@ -2266,6 +2320,7 @@ function fmtRemain(sec){
 }
 
 async function refreshRents(){
+  if(protectedRestriction()) return;
   let data;
   try{ data = await (await fetch('/api/sms/rents')).json(); }catch(e){ return; }
   const wrap = $('#sms-rents'); wrap.innerHTML='';
@@ -2306,6 +2361,7 @@ async function refreshRents(){
 }
 
 $('#btn-rent').onclick = async ()=>{
+  if(protectedRestriction()) return;
   const btn=$('#btn-rent'); const o=btn.textContent; btn.disabled=true; btn.textContent='租号中…';
   const body={ service: $('#sms-service').value.trim()||undefined, country: $('#sms-country').value.trim()||undefined,
     prefer_multi: $('#sms-prefer-multi') ? $('#sms-prefer-multi').checked : true };
@@ -2317,6 +2373,7 @@ $('#btn-rent').onclick = async ()=>{
 };
 
 async function getCode(pkey, btn){
+  if(protectedRestriction()) return;
   const o=btn.textContent; btn.disabled=true; btn.textContent='等待验证码…';
   const msg = document.querySelector(`[data-msg="${pkey}"]`);
   if(msg) msg.textContent='';
@@ -2328,6 +2385,7 @@ async function getCode(pkey, btn){
 }
 
 async function releaseNum(pkey){
+  if(protectedRestriction()) return;
   await fetch('/api/sms/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pkey})});
   await refreshRents();
 }
@@ -2669,6 +2727,7 @@ async function renderGuideStep(index){
 }
 
 async function startGuide(index=0){
+  if(protectedRestriction()) return;
   if(scriptsReady){
     try{ await scriptsReady; }catch(_error){}
   }
@@ -2717,6 +2776,7 @@ document.addEventListener('keydown', event=>{
 
 // ---------------------------------------------------------------- 邮箱池
 async function loadMailpool(){
+  if(protectedRestriction()) return;
   try{
     const d = await (await fetch('/api/mailpool')).json();
     $('#mailpool-total').textContent = `当前池中 ${d.total} 个邮箱`;
@@ -2724,6 +2784,7 @@ async function loadMailpool(){
 }
 
 $('#btn-import-mail').onclick = async ()=>{
+  if(protectedRestriction()) return;
   const text = $('#mailpool-input').value;
   if(!text.trim()){ $('#mailpool-msg').textContent='请先粘贴邮箱'; return; }
   const btn=$('#btn-import-mail'); const o=btn.textContent; btn.disabled=true; btn.textContent='导入中…';
@@ -2745,9 +2806,15 @@ $('#btn-import-mail').onclick = async ()=>{
 };
 
 // ---------------------------------------------------------------- 启动
+if(RF_CONSOLE_PROTECTED) window.RFProtectedConsole.initRouting();
 scriptsReady = loadScripts();
 scriptsReady.then(()=>{
+  if(RF_CONSOLE_PROTECTED) return;
   if(!guideStorageCompleted()) setTimeout(()=>startGuide(0), 500);
 }).catch(()=>{});
-pollStatus();
-loadCustomSmsPool();
+if(!RF_CONSOLE_PROTECTED){
+  pollStatus();
+  loadCustomSmsPool();
+}else{
+  window.RFProtectedConsole?.lock();
+}

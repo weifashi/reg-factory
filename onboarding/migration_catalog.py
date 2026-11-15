@@ -12,6 +12,8 @@ from .errors import ErrorCode, ServiceError
 _MIGRATIONS = (
     (1, '001_core.sql', '3fb6617853233370e867cbf7768b9e2953f929f29ecbd60eb638fa577c0f7782'),
     (2, '002_pools.sql', 'b763180ee4d782e6e88f2a78ac3bbf34df026425133e8c05ca99143eb56ec764'),
+    (3, '003_live_effects.sql', 'd217edc53b612c02c099fb59bab8c3e27a8c4277d812418e3c858eec9efac1ca'),
+    (4, '004_live_runs.sql', '3775b290d0552b26891f67b0b5fecadce89e73d023e6629a58b917f47b8d36a6'),
 )
 
 

@@ -68,3 +68,28 @@ class LifecycleTests(unittest.TestCase):
                 else:
                     self.assertEqual(login.status_code, 404)
                     self.assertEqual(page.status_code, 404)
+
+    def test_ready_pool_root_is_business_entry_and_diagnostics_remains_separate(self):
+        import httpx
+        with isolated_server(values={'ONBOARDING_POOL_MODE': 'synthetic'}) as server:
+            server._onboarding_config.pool_ready = True
+            async def requests():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='https://fixture.test') as client:
+                    return await client.get('/'), await client.get('/onboarding')
+            with patch('webui.onboarding_console.render_console', return_value=('fixture-unified-page', '')) as renderer:
+                home, diagnostics = asyncio.run(requests())
+            renderer.assert_called_once_with('fixture-legacy-page',
+                pool_source='fixture-pools-page', pool_mode='synthetic')
+            self.assertEqual(home.status_code, 200)
+            self.assertEqual(home.text, 'fixture-unified-page')
+            self.assertNotIn('location', home.headers)
+            self.assertEqual(diagnostics.text, 'fixture-protected-page')
+            self.assertNotIn('set-cookie', home.headers)
+
+    def test_requested_pool_unready_root_fails_closed_not_legacy_or_success(self):
+        with isolated_server(values={'ONBOARDING_POOL_MODE': 'synthetic'}) as server:
+            self.assertFalse(server._onboarding_config.pool_ready)
+            response = server.index()
+            self.assertTrue(hasattr(response, 'status_code'), 'pool-unready home must return an error response')
+            self.assertEqual(response.status_code, 503)
+            self.assertNotIn('fixture-legacy-page', response.body.decode())

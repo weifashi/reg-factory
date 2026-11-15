@@ -299,6 +299,7 @@ def _history(conn, actor, summary):
                               (summary['config_id'],)).fetchone()
     pool_repository._row(config_row, 7)
     config = pool_config._project(config_row)
+    pool_config._require_synthetic(config)
     if config['id'] != summary['config_id'] or config['revision'] != summary['config_revision']:
         _deny()
     rows = conn.execute('SELECT id,batch_id,config_id,execution_scope,platform,platform_plan,mailbox_id,mailbox_ref '
@@ -466,6 +467,8 @@ def create(settings, actor, selection, requested_count, mailbox_ids,
                 pool_config._guard_locked(conn, shared=True)
                 security.revalidate(conn, actor, 'tasks:manage')
                 config = pool_config._current_locked(conn)
+                if config is not None:
+                    pool_config._require_synthetic(config)
                 if config is not None and config['revision'] != expected_config_revision:
                     # Spec C4: rerun the success-path tail before the not-committed proof.
                     _final(conn, actor, policy, mac, probe, [], [])
@@ -546,6 +549,8 @@ def preflight(settings, actor, selection, requested_count, mailbox_ids, *, polic
             _owner(conn.execute('SELECT id,owner_operator_id FROM mailbox_registry WHERE id=%s',
                                 (mid,)).fetchone(), mid, actor)
         config = pool_config._current_locked(conn)  # Historical name; SELECT only.
+        if config is not None:
+            pool_config._require_synthetic(config)
         if selection == 'automatic':
             rows = conn.execute(_AUTO, (actor.operator_id, requested_count)).fetchall()
             ids = []

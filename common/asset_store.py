@@ -9,7 +9,10 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
+
+from common.managed_mailboxes import MailboxBoundaryError, management_lock, mailbox_source_root
 
 from common.session_export import (
     build_chatgpt2api_account,
@@ -93,6 +96,36 @@ def classify_email_provider(email: str) -> str:
 
 def _data_root() -> Path:
     return Path(os.environ.get("REG_FACTORY_DATA_DIR") or Path.cwd()).resolve()
+
+
+def _mailbox_boundary(function):
+    """Keep selection, credential delivery and delayed claim under one OS lock."""
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        root = _data_root()
+        # A file alias in another data root would read the original password
+        # while consulting an unrelated ownership registry. Refuse that split.
+        for name in ("emails.txt", "outlook_no_graph.txt"):
+            source = root / name
+            if source.is_symlink() or mailbox_source_root(source) != root:
+                raise MailboxBoundaryError()
+        with management_lock(root):
+            return function(*args, **kwargs)
+    return guarded
+
+
+def _legacy_records(records, email_for):
+    with management_lock(_data_root()) as boundary:
+        return boundary.filter_unmanaged(records, email_for)
+
+
+@_mailbox_boundary
+def _record_legacy_delivery(email):
+    # A source-only cookie cannot be assigned to a mailbox. Registration rejects
+    # its unresolved claim rather than inventing an identity for it.
+    if email:
+        with management_lock(_data_root()) as boundary:
+            boundary.record_legacy_use(email)
 
 
 def _token_root() -> Path:
@@ -583,6 +616,7 @@ def _asset_identity(email: str, source: str) -> str:
     return f"source:{str(source or '').strip().lower()}"
 
 
+@_mailbox_boundary
 def _claim_record(
     records: list[dict],
     scope: str,
@@ -595,8 +629,14 @@ def _claim_record(
         claimed = set(claims.get(scope, set()))
         candidates = []
         seen = set(claimed)
+        def mailbox_for(record):
+            identity = identity_for(record)
+            return identity[6:] if identity.startswith("email:") else None
+        with management_lock(_data_root()) as boundary:
+            records = boundary.filter_unmanaged(records, mailbox_for)
         for record in records:
-            claim = _claim_id(scope, identity_for(record))
+            identity = identity_for(record)
+            claim = _claim_id(scope, identity)
             if claim in seen:
                 continue
             seen.add(claim)
@@ -610,13 +650,17 @@ def _claim_record(
             raise AssetNotFound(f"index 超出未领取资产范围：{selected}，可用范围 0-{total - 1}")
 
         record, claim = candidates[selected]
+        identity = identity_for(record)
+        if identity.startswith("email:"):
+            _record_legacy_delivery(identity[6:])
         claimed.add(claim)
         claims[scope] = claimed
         _write_claims(claims)
     return selected, record, total, total - 1, index is None
 
 
-def _select_index(total: int, cursor_key: str, index: int | None) -> tuple[int, int, bool]:
+def _select_index(total: int, cursor_key: str, index: int | None,
+                  before_advance=None) -> tuple[int, int, bool]:
     if total <= 0:
         raise AssetNotFound("没有可读取的资产")
     if index is not None:
@@ -628,6 +672,8 @@ def _select_index(total: int, cursor_key: str, index: int | None) -> tuple[int, 
         selected = int(cursors.get(cursor_key, 0))
         if selected >= total:
             raise AssetExhausted(f"顺序游标已取完：{selected}/{total}；请指定 index 或重置游标")
+        if before_advance is not None:
+            before_advance(selected)
         cursors[cursor_key] = selected + 1
         _write_cursors(cursors)
     return selected, selected + 1, True
@@ -645,6 +691,7 @@ def _claim_scope(scope: str) -> str:
     return ""
 
 
+@_mailbox_boundary
 def reset_cursor(scope: str = "all") -> dict:
     normalized = str(scope or "all").strip().lower()
     with _CURSOR_LOCK:
@@ -883,6 +930,7 @@ def _status_records(
     return filtered
 
 
+@_mailbox_boundary
 def get_email(
     index: int | None = None,
     output_format: str = "json",
@@ -911,6 +959,7 @@ def get_email(
         ]
     if provider_filter:
         records = [record for record in records if record.get("email_provider") == provider_filter]
+    records = _legacy_records(records, lambda record: record.get("email", ""))
     registered = registered_mailbox_usage()
     records = [
         record for record in records
@@ -939,9 +988,13 @@ def get_email(
         )
         next_index = 0 if remaining else None
     else:
-        selected, next_index, advanced = _select_index(len(records), "email", index)
+        selected, next_index, advanced = _select_index(
+            len(records), "email", index,
+            before_advance=lambda chosen: _record_legacy_delivery(records[chosen].get("email", "")),
+        )
         record = records[selected]
         total = len(records)
+    _record_legacy_delivery(record.get("email", ""))
     if output_format == "four":
         data = _mailbox_four_line(record)
     elif output_format in {"line", "password"}:
@@ -1250,6 +1303,7 @@ def _mailbox_delivery_details(email: str, session: dict | None, mailbox_records:
     }
 
 
+@_mailbox_boundary
 def get_platform_asset(
     platform: str,
     output_format: str = "raw",
@@ -1284,7 +1338,7 @@ def get_platform_asset(
     mailbox_records = {}
     if output_format in {"raw", "cookies", "header"}:
         mailbox_records = _mailbox_map()
-        records = _cookie_records(platform)
+        records = _legacy_records(_cookie_records(platform), lambda record: record.get("email", ""))
         if provider_filter:
             records = [record for record in records if record.get("email_provider") == provider_filter]
         if phone_filter == "verified":
@@ -1301,7 +1355,10 @@ def get_platform_asset(
             next_index = 0 if remaining else None
         else:
             cursor_key = f"cookie:{platform}:{output_format}"
-            selected, next_index, advanced = _select_index(len(records), cursor_key, index)
+            selected, next_index, advanced = _select_index(
+                len(records), cursor_key, index,
+                before_advance=lambda chosen: _record_legacy_delivery(records[chosen].get("email", "")),
+            )
             record = records[selected]
             total = len(records)
         if output_format == "raw":
@@ -1326,7 +1383,8 @@ def get_platform_asset(
             raise AssetError("Grok 仅支持 cookies、raw、header、session、sub2api 格式")
         if output_format == "email_four" and platform != "chatgpt":
             raise AssetError("email_four 仅适用于 ChatGPT 注册邮箱")
-        records = _token_records(platform)
+        records = _legacy_records(_token_records(platform), lambda record:
+            _email_from_session(record["data"], record["path"].stem.replace(".session", "")))
         mailbox_records = _chatgpt_registration_mailbox_map(records)
         if output_format == "email_four":
             records = [
@@ -1379,7 +1437,11 @@ def get_platform_asset(
             next_index = 0 if remaining else None
         else:
             cursor_key = f"cookie:{platform}:{output_format}"
-            selected, next_index, advanced = _select_index(len(records), cursor_key, index)
+            selected, next_index, advanced = _select_index(
+                len(records), cursor_key, index,
+                before_advance=lambda chosen: _record_legacy_delivery(_email_from_session(
+                    records[chosen]["data"], records[chosen]["path"].stem.replace(".session", ""))),
+            )
             record = records[selected]
             total = len(records)
         session = record["data"]
@@ -1417,6 +1479,7 @@ def get_platform_asset(
     else:
         raise AssetError("format 仅支持 raw、cookies、header、session、sub2api、cpa、chatgpt2api、email_four")
 
+    _record_legacy_delivery(email)
     result = {
         "kind": "platform_cookie",
         "platform": platform,
@@ -1452,6 +1515,7 @@ def get_platform_asset(
     return result
 
 
+@_mailbox_boundary
 def export_batch(
     resource: str,
     output_format: str = "",

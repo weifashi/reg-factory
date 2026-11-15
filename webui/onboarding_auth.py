@@ -82,6 +82,11 @@ class WebConfig:
     pool_mac: object = field(default=None, repr=False)
     pool_policy: object = field(default=None, repr=False)
     pool_vault: object = field(default=None, repr=False)
+    live_policy: object = field(default=None, repr=False)
+    live_vault: object = field(default=None, repr=False)
+    live_source: object = field(default=None, repr=False)
+    live_manager: object = field(default=None, repr=False)
+    live_mailbox_id: str | None = None
 
 # This is an explicit policy, not runtime discovery: a future route stays denied.
 _PUBLIC = {('GET', path) for path in (
@@ -180,8 +185,16 @@ async def read_json(request, max_bytes=8192):
 
 _POOL_FIXED = {
     **{('GET', path): 'onboarding:read' for path in (
-        '/onboarding/pools', '/static/onboarding-pools.js',
+        '/onboarding/pools', '/static/onboarding-pools.js', '/static/onboarding-cards.js',
+        '/static/style.css', '/static/onboarding-shell.css', '/static/onboarding-shell.js',
+        '/static/app.js', '/static/console-protected.js', '/static/console-protected.css',
+        '/assets/telegram_qr.jpg',
+        '/api/onboarding/console/catalog', '/api/onboarding/console/styles.css',
         '/api/onboarding/mailboxes', '/api/onboarding/tasks')},
+    ('GET', '/api/onboarding/cards'): 'cards:manage',
+    ('GET', '/api/onboarding/cards/template'): 'cards:manage',
+    ('POST', '/api/onboarding/cards/import-preview'): 'cards:manage',
+    ('POST', '/api/onboarding/cards/import'): 'cards:manage',
     ('POST', '/api/onboarding/mailboxes/import-preview'): 'mailboxes:manage',
     ('POST', '/api/onboarding/mailboxes/import'): 'mailboxes:manage',
     ('GET', '/api/onboarding/config'): 'config:manage',
@@ -195,8 +208,35 @@ def _pool_permission(method, path):
     import re
     if (method, path) in _POOL_FIXED:
         return _POOL_FIXED[method, path]
+    if method == 'GET' and re.fullmatch('/api/onboarding/tasks/' + _UUID_PATH + '/events', path):
+        return 'onboarding:read'
     if method == 'PATCH' and re.fullmatch(r'/api/onboarding/mailboxes/[^/]+', path):
         return 'mailboxes:manage'
+    if method == 'PATCH' and re.fullmatch(r'/api/onboarding/cards/[^/]+', path):
+        return 'cards:manage'
+    return None
+
+
+# Keep the original synthetic endpoints closed in live mode. This is a fixed
+# reviewed allowlist, not a broad /api/onboarding prefix grant.
+_LIVE_FIXED = {
+    **{key: value for key, value in _POOL_FIXED.items() if key[0] == 'GET'},
+    ('PUT', '/api/onboarding/config'): 'config:manage',
+    ('GET', '/api/onboarding/live/capabilities'): 'onboarding:read',
+    ('POST', '/api/onboarding/live/start'): 'tasks:manage',
+    ('POST', '/api/onboarding/live/source-preview'): 'mailboxes:manage',
+    ('POST', '/api/onboarding/live/source-import'): 'mailboxes:manage',
+}
+
+
+def _live_permission(method, path):
+    import re
+    if (method, path) in _LIVE_FIXED:
+        return _LIVE_FIXED[method, path]
+    if method == 'GET' and re.fullmatch('/api/onboarding/tasks/' + _UUID_PATH + '(?:/events)?', path):
+        return 'onboarding:read'
+    if method == 'POST' and re.fullmatch('/api/onboarding/tasks/' + _UUID_PATH + '/(?:pause|cancel)', path):
+        return 'tasks:manage'
     return None
 
 
@@ -224,7 +264,8 @@ def _transport(request, config):
     from onboarding.errors import ErrorCode, ServiceError
     from urllib.parse import urlsplit
     # ASGI scheme and Host are authoritative. Forwarded headers are ignored.
-    for name in ('host', 'origin', 'content-type', 'content-length', 'x-csrf-token', 'sec-fetch-site', 'referer'):
+    for name in ('host', 'origin', 'content-type', 'content-length', 'x-csrf-token',
+                 'sec-fetch-site', 'referer', 'accept', 'sec-fetch-mode', 'sec-fetch-dest'):
         if len(request.headers.getlist(name)) > 1:
             raise ServiceError(ErrorCode.FORBIDDEN)
     if request.scope.get('scheme') != 'https':
@@ -232,15 +273,32 @@ def _transport(request, config):
     origin = request.headers.get('origin')
     security.check_request(config.expected_origin if origin is None else origin, request.headers.get('host'),
                            config.expected_origin)
-    if request.headers.get('sec-fetch-site') not in (None, 'same-origin', 'none'):
+    # External document entry may reach only static login or a fixed login redirect.
+    # Fetch metadata is not authentication; no API or business response gains access.
+    external_navigation = (
+        request.method == 'GET'
+        and request.url.path in ('/login', '/', '/onboarding', '/onboarding/pools')
+        and origin is None
+        and request.headers.get('sec-fetch-site') in ('same-site', 'cross-site')
+        and request.headers.get('sec-fetch-mode') == 'navigate'
+        and request.headers.get('sec-fetch-dest') == 'document'
+        and 'text/html' in {part.split(';', 1)[0].strip().lower()
+                            for part in request.headers.get('accept', '').split(',')}
+    )
+    if request.headers.get('sec-fetch-site') not in (None, 'same-origin', 'none') and not external_navigation:
         raise ServiceError(ErrorCode.FORBIDDEN)
     referer = request.headers.get('referer')
     if referer:
         try:
             parsed = urlsplit(referer)
+            if external_navigation and (parsed.scheme not in ('http', 'https') or not parsed.hostname
+                                        or parsed.username is not None or parsed.password is not None):
+                raise ValueError
+            if external_navigation:
+                parsed.port  # Validate malformed ports before accepting an external referer.
         except ValueError:
             raise ServiceError(ErrorCode.FORBIDDEN) from None
-        if parsed.scheme + '://' + parsed.netloc != config.expected_origin:
+        if parsed.scheme + '://' + parsed.netloc != config.expected_origin and not external_navigation:
             raise ServiceError(ErrorCode.FORBIDDEN)
     if request.method not in ('GET', 'HEAD'):
         security.check_request(origin, request.headers.get('host'), config.expected_origin,
@@ -254,6 +312,7 @@ def _transport(request, config):
                 if name in names:
                     raise ServiceError(ErrorCode.FORBIDDEN)
                 names.append(name)
+    return external_navigation
 
 
 def _authenticate_request(request, config, permission):
@@ -291,11 +350,19 @@ class ProtectionMiddleware:
             if not self.config.ready:
                 response = error_response('DEPENDENCY_UNAVAILABLE', correlation_id=correlation)
             else:
-                _transport(request, self.config)
+                external_navigation = _transport(request, self.config)
                 policy, permission = _policy(request.method, request.url.path)
                 pool_permission = _pool_permission(request.method, request.url.path)
                 if pool_permission is not None and self.config.pool_mode == 'synthetic':
                     policy, permission = 'pool', pool_permission
+                if self.config.pool_mode == 'live':
+                    live_permission = _live_permission(request.method, request.url.path)
+                    if live_permission is not None:
+                        policy, permission = 'pool', live_permission
+                    elif request.url.path.startswith('/api/onboarding/') and request.url.path != '/api/onboarding/diagnostics':
+                        policy, permission = 'deny', None
+                if external_navigation and request.url.path != '/login':
+                    policy = 'external_navigation'
                 if '%' in scope.get('raw_path', b'').decode('ascii', errors='replace') or '\\' in request.url.path:
                     policy = 'deny'
                 if request.url.path.startswith('/api/auth/') and request.url.query:
@@ -310,6 +377,9 @@ class ProtectionMiddleware:
                         response = error_response('RATE_LIMITED', correlation_id=correlation)
                 if policy == 'deny':
                     response = error_response('FORBIDDEN', correlation_id=correlation)
+                elif policy == 'external_navigation':
+                    from starlette.responses import RedirectResponse
+                    response = RedirectResponse('/login', status_code=303)
                 elif policy == 'pool' and not self.config.pool_ready:
                     response = error_response('DEPENDENCY_UNAVAILABLE', correlation_id=correlation)
                 elif policy != 'public':
@@ -373,7 +443,7 @@ def _pool_context(settings, keyring, mac):
 
 
 def install(app, *, mode, expected_origin=None, settings_path=None, settings=None,
-            pool_mode='off', pool_keyring=None, pool_mac=None):
+            pool_mode='off', pool_keyring=None, pool_mac=None, live_binding_path=None):
     """Off mode neither imports the database stack nor changes app routes."""
     if mode == 'off' and pool_mode in ('off', 'synthetic'):
         return WebConfig(mode, expected_origin)
@@ -387,24 +457,40 @@ def install(app, *, mode, expected_origin=None, settings_path=None, settings=Non
         if settings is None:
             settings = load_settings(settings_path)
         validate_settings(settings)
-        ready = mode == 'protected' and pool_mode in ('off', 'synthetic')
+        ready = mode == 'protected' and pool_mode in ('off', 'synthetic', 'live')
     except Exception:
         settings = None
     pool_ready, policy, vault = False, None, None
+    live = {}
     if ready and pool_mode == 'synthetic':
         try:
             policy, vault = _pool_context(settings, pool_keyring, pool_mac)
             pool_ready = True
         except Exception:
             policy, vault = None, None
+    if ready and pool_mode == 'live':
+        try:
+            live = _live_context(settings, pool_keyring, pool_mac, live_binding_path)
+            pool_ready = True
+        except Exception:
+            live = {}
     config = WebConfig(mode, expected_origin, settings, ready, pool_mode, pool_ready,
                        pool_keyring if pool_ready else None, pool_mac if pool_ready else None,
-                       policy, vault)
+                       policy, vault, **live)
     app.state.onboarding_config = config
     app.add_middleware(ProtectionMiddleware, config=config)
     if ready:
         _install_auth_routes(app, config)
+    if config.live_manager is not None:
+        # No startup adoption of existing rows. The manager owns/joins only
+        # runs created explicitly in this process through the live HTTP entry.
+        app.router.add_event_handler('shutdown', config.live_manager.shutdown)
     return config
+
+
+def _live_context(settings, keyring, mac, binding_path):
+    from .onboarding_live_boot import prepare
+    return prepare(settings, keyring, mac, binding_path)
 
 
 def _cookie(response, name, value, max_age):
@@ -461,8 +547,8 @@ def _install_auth_routes(app, config):
             origin=request.headers.get('origin'), expected_origin=config.expected_origin,
             previous_token=request.cookies.get(SESSION_COOKIE))
         response = JSONResponse({'authenticated': True})
-        _cookie(response, SESSION_COOKIE, result.session_token, 28800)
-        _cookie(response, CSRF_COOKIE, result.csrf_token, 28800)
+        _cookie(response, SESSION_COOKIE, result.session_token, security.SESSION_LIFETIME_SECONDS)
+        _cookie(response, CSRF_COOKIE, result.csrf_token, security.SESSION_LIFETIME_SECONDS)
         _cookie(response, PREAUTH_COOKIE, '', 0)
         return response
 

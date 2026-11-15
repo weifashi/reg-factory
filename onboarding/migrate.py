@@ -59,7 +59,9 @@ def apply_migration(conn, schema, *, script=None, target_version=1):
     try:
         with conn.transaction():
             conn.execute("SET LOCAL lock_timeout = '2s'")
-            conn.execute("SET LOCAL statement_timeout = '5s'")
+            # Explicit DDL has a separate bounded maintenance budget. This does
+            # not alter storage.unit_of_work or any lease/effect dispatch guard.
+            conn.execute("SET LOCAL statement_timeout = '30s'")
             conn.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'")
             row = conn.execute(
                 "SELECT current_database(),current_user,inet_server_addr(),"
@@ -85,8 +87,12 @@ def apply_migration(conn, schema, *, script=None, target_version=1):
             conn.execute('INSERT INTO schema_migrations(version,checksum) VALUES(%s,%s)', (target_version, checksum))
             if target_version == 1:
                 _grant_application(conn, schema)
-            else:
+            elif target_version == 2:
                 _grant_pool_application(conn, schema)
+            elif target_version == 3:
+                _grant_live_effects(conn, schema)
+            else:
+                _grant_live_runs(conn, schema)
             committing = True
         return True
     except ServiceError:
@@ -151,6 +157,19 @@ def _grant_pool_application(conn, schema):
         conn.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}' + signature + ' TO rf_onboarding_app').format(sql.Identifier(schema, name)))
 
 
+def _grant_live_effects(conn, schema):
+    name = sql.Identifier(schema, 'live_effect_journal')
+    conn.execute(sql.SQL('REVOKE ALL ON {} FROM PUBLIC, rf_onboarding_app').format(name))
+    conn.execute(sql.SQL('GRANT SELECT, INSERT, UPDATE ON {} TO rf_onboarding_app').format(name))
+
+
+def _grant_live_runs(conn, schema):
+    for table in ('live_run_plans', 'live_effect_observations'):
+        name = sql.Identifier(schema, table)
+        conn.execute(sql.SQL('REVOKE ALL ON {} FROM PUBLIC, rf_onboarding_app').format(name))
+        conn.execute(sql.SQL('GRANT SELECT, INSERT ON {} TO rf_onboarding_app').format(name))
+
+
 def main(argv=None):
     import argparse
     import sys
@@ -159,7 +178,7 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--settings', required=True, help='Owner-private migrator JSON under the dedicated test base')
-    parser.add_argument('--target-version', type=int, choices=(1, 2), default=1,
+    parser.add_argument('--target-version', type=int, choices=(1, 2, 3, 4), default=1,
                         help='Explicit reviewed target; default preserves the core-only setup')
     args = parser.parse_args(argv)
     try:

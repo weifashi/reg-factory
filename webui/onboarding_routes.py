@@ -100,6 +100,9 @@ def register_routes(app, config):
 
     @router.get('/api/onboarding/tasks/{task_id}')
     async def task_route(request: Request, task_id: str):
+        if config.pool_mode == 'live':
+            from .onboarding_live_routes import task_detail
+            return await task_detail(request, config, task_id)
         _task_request(request, task_id)
         settings, actor = context(request)
         if getattr(config, 'pool_ready', False):
@@ -116,6 +119,9 @@ def register_routes(app, config):
         return await run_in_threadpool(read_task, settings, actor, task_id)
 
     async def command_route(request: Request, task_id: str, action: str):
+        if config.pool_mode == 'live':
+            from .onboarding_live_routes import task_command
+            return await task_command(request, config, task_id, action)
         settings, actor = context(request)
         body = await read_json(request)
         _task_request(request, task_id, body)

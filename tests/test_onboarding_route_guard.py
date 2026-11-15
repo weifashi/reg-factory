@@ -99,6 +99,40 @@ class GuardTests(unittest.TestCase):
                     self.assertEqual(response.headers['cache-control'],'no-store')
 
 
+class ConsoleAssetGuardTests(unittest.TestCase):
+    def client(self, ready=True):
+        from webui.onboarding_auth import ProtectionMiddleware, WebConfig
+        from starlette.responses import PlainTextResponse
+        app = FastAPI()
+        for path in ('/static/style.css', '/static/onboarding-shell.css', '/static/onboarding-shell.js',
+                     '/static/app.js', '/static/other.css'):
+            app.add_api_route(path, lambda: PlainTextResponse('fixture-asset'), methods=['GET'])
+        app.add_middleware(ProtectionMiddleware, config=WebConfig('protected', 'https://fixture.local',
+            ready=True, pool_mode='synthetic', pool_ready=ready))
+        return TestClient(app, base_url='https://fixture.local')
+
+    def test_only_exact_console_assets_use_existing_read_permission(self):
+        from onboarding.security import Actor
+        with patch('webui.onboarding_auth._authenticate_request', return_value=Actor('operator', frozenset(), 'session', 1)) as auth:
+            with self.client() as client:
+                for path in ('/static/style.css', '/static/onboarding-shell.css', '/static/onboarding-shell.js'):
+                    response = client.get(path)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(auth.call_args.args[-1], 'onboarding:read')
+                for path in ('/static/other.js', '/static/other.css'):
+                    self.assertEqual(client.get(path).status_code, 403)
+                self.assertEqual(client.post('/static/style.css', json={}, headers={'Origin':'https://fixture.local'}).status_code,403)
+
+    def test_console_assets_require_session_and_ready_pool(self):
+        from onboarding.errors import ServiceError, ErrorCode
+        with patch('webui.onboarding_auth._authenticate_request', side_effect=ServiceError(ErrorCode.UNAUTHENTICATED)):
+            with self.client() as client:
+                for path in ('/static/style.css', '/static/onboarding-shell.css', '/static/onboarding-shell.js'):
+                    self.assertEqual(client.get(path).status_code,401)
+        with self.client(ready=False) as client:
+            self.assertEqual(client.get('/static/style.css').status_code,503)
+
+
 class AuthRouterTests(unittest.TestCase):
     """Network-boundary tests mock only DB services; no legacy app import."""
     module = GuardTests.module
@@ -147,6 +181,10 @@ class AuthRouterTests(unittest.TestCase):
         self.assertTrue(any(c.startswith(CSRF_COOKIE+'=') for c in cookies))
         self.assertTrue(any(c.startswith(SESSION_COOKIE+'=') for c in cookies))
         self.assertTrue(all('HttpOnly' in c and 'Secure' in c and 'SameSite=strict' in c for c in cookies))
+        for name in (SESSION_COOKIE,CSRF_COOKIE):
+            cookie = next(c for c in cookies if c.startswith(name+'='))
+            self.assertIn('Max-Age=2592000',cookie)
+        self.assertIn('Max-Age=0',next(c for c in cookies if c.startswith(PREAUTH_COOKIE+'=')))
 
     def test_login_bad_json_and_fields_never_call_login(self):
         with patch('onboarding.security.login') as login:
@@ -263,6 +301,120 @@ class AuthRouterTests(unittest.TestCase):
         self.assertEqual(response.status_code,422)
         self.assertEqual(set(response.json()),{'code','correlation_id'})
         self.assertNotIn('canary',response.text)
+
+
+class ExternalNavigationTests(unittest.TestCase):
+    """Real middleware boundaries; external entry must never read sessions/data."""
+    nav = {'Accept': 'text/html,application/xhtml+xml', 'Sec-Fetch-Site': 'cross-site',
+           'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document',
+           'Referer': 'https://outside.example/source'}
+
+    def client(self, *, ready=True, pool_mode='synthetic'):
+        from webui.onboarding_auth import ProtectionMiddleware, WebConfig
+        from starlette.responses import HTMLResponse
+        app = FastAPI()
+        @app.get('/login')
+        def login(): return HTMLResponse('<h1>Static login</h1>')
+        def business(): raise AssertionError('external navigation reached business')
+        for path in ('/', '/onboarding', '/onboarding/pools'):
+            app.add_api_route(path, business, methods=['GET'])
+        app.add_middleware(ProtectionMiddleware, config=WebConfig(
+            'protected', 'https://fixture.local', ready=ready, pool_mode=pool_mode))
+        return TestClient(app, base_url='https://fixture.local', follow_redirects=False)
+
+    def test_external_pages_redirect_without_auth_business_or_cookie_change(self):
+        with patch('webui.onboarding_auth._authenticate_request', side_effect=AssertionError('no auth')) as auth:
+            for mode in ('off', 'synthetic'):
+                with self.client(pool_mode=mode) as client:
+                    for site in ('same-site', 'cross-site'):
+                        for path in ('/', '/onboarding', '/onboarding/pools'):
+                            for cookie in ('', '__Host-rf_session=session-shaped-value'):
+                                with self.subTest(mode=mode, site=site, path=path, cookie=bool(cookie)):
+                                    r = client.get(path+'?next=https://evil.example/', headers={
+                                        **self.nav, 'Sec-Fetch-Site': site, 'Cookie': cookie})
+                                    self.assertEqual(r.status_code, 303)
+                                    self.assertEqual(r.headers['location'], '/login')
+                                    self.assertNotIn('set-cookie', r.headers)
+                                    self.assertEqual(r.headers['cache-control'], 'no-store')
+                                    self.assertEqual(r.headers['referrer-policy'], 'no-referrer')
+                                    self.assertIn("frame-ancestors 'none'", r.headers['content-security-policy'])
+            auth.assert_not_called()
+
+    def test_external_login_and_redirect_chain_render_only_static_login(self):
+        with self.client() as client:
+            for site in ('same-site', 'cross-site'):
+                headers = {**self.nav, 'Sec-Fetch-Site': site}
+                r = client.get('/onboarding/pools', headers=headers, follow_redirects=True)
+                self.assertEqual([x.status_code for x in r.history], [303])
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.text, '<h1>Static login</h1>')
+                self.assertNotIn('set-cookie', r.headers)
+                self.assertEqual(client.get('/login', headers=headers).status_code, 200)
+
+    def test_navigation_exception_never_covers_api_assets_or_unknown_routes(self):
+        with self.client() as client:
+            for path in ('/api/auth/bootstrap', '/api/auth/session', '/api/onboarding/mailboxes',
+                         '/api/env', '/static/onboarding-login.html', '/static/onboarding-login.js',
+                         '/healthz', '/unknown', '/docs'):
+                with self.subTest(path=path):
+                    self.assertEqual(client.get(path, headers=self.nav).status_code, 403)
+
+    def test_navigation_requires_exact_metadata_and_no_origin(self):
+        cases = [dict(self.nav, **{key: value}) for key, values in (
+            ('Accept', ('application/json', '*/*', 'not-text/html')),
+            ('Sec-Fetch-Mode', ('cors', 'no-cors', 'navigate, cors')),
+            ('Sec-Fetch-Dest', ('iframe', 'empty', 'document, iframe')),
+            ('Sec-Fetch-Site', ('unknown', 'cross-site, same-origin')),
+            ('Origin', ('https://outside.example', 'https://fixture.local', '')),
+            ('Referer', ('https://[', 'javascript:alert(1)', 'https:///missing-host')),
+        ) for value in values]
+        for key in ('Accept', 'Sec-Fetch-Mode', 'Sec-Fetch-Dest', 'Sec-Fetch-Site'):
+            headers = dict(self.nav); del headers[key]; cases.append(headers)
+        with self.client() as client:
+            for headers in cases:
+                with self.subTest(headers=headers):
+                    self.assertEqual(client.get('/login', headers=headers).status_code, 403)
+
+    def test_external_navigation_retains_https_host_and_raw_path_checks(self):
+        with self.client() as client:
+            for url, extra in (('http://fixture.local/login', {'X-Forwarded-Proto': 'https'}),
+                               ('/login', {'Host': 'evil.example', 'X-Forwarded-Host': 'fixture.local'}),
+                               ('/%6cogin', {}), ('/onboarding/%70ools', {}),
+                               ('/onboarding%5cpools', {})):
+                with self.subTest(url=url):
+                    self.assertEqual(client.get(url, headers={**self.nav, **extra}).status_code, 403)
+
+    def test_duplicate_headers_and_auth_cookies_still_fail_before_redirect(self):
+        with self.client() as client:
+            for name, value in (('Host', 'fixture.local'), ('Accept', 'text/html'),
+                                ('Sec-Fetch-Mode', 'navigate'), ('Sec-Fetch-Dest', 'document'),
+                                ('Sec-Fetch-Site', 'cross-site'), ('Referer', 'https://outside.example/'),
+                                ('Origin', 'https://fixture.local'), ('X-CSRF-Token', 'canary'),
+                                ('Content-Type', 'application/json'), ('Content-Length', '0')):
+                headers = [(k,v) for k,v in self.nav.items() if k.lower()!=name.lower()]
+                headers += [(name,value),(name,value)]
+                with self.subTest(name=name):
+                    self.assertEqual(client.get('/onboarding/pools', headers=headers).status_code, 403)
+            for name in ('__Host-rf_session', '__Host-rf_csrf', '__Host-rf_preauth'):
+                self.assertEqual(client.get('/login', headers={**self.nav,
+                    'Cookie': name+'=first; '+name+'=second'}).status_code, 403)
+
+    def test_non_get_and_unready_do_not_gain_navigation_exception(self):
+        with self.client() as client:
+            for method in ('HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'):
+                self.assertEqual(client.request(method, '/login', headers=self.nav).status_code, 403)
+        with self.client(ready=False) as client:
+            self.assertEqual(client.get('/login', headers=self.nav).status_code, 503)
+
+    def test_same_origin_navigation_still_authenticates(self):
+        from onboarding.errors import ErrorCode, ServiceError
+        with patch('webui.onboarding_auth._authenticate_request', side_effect=ServiceError(ErrorCode.UNAUTHENTICATED)) as auth:
+            with self.client() as client:
+                r = client.get('/', headers={**self.nav, 'Sec-Fetch-Site': 'same-origin',
+                                             'Referer': 'https://fixture.local/login'})
+                self.assertEqual(r.status_code, 303)
+                self.assertEqual(r.headers['location'], '/login?reason=expired')
+            auth.assert_called_once()
 
 
 from onboarding_b2_support import B2Case

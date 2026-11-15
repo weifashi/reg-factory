@@ -1,24 +1,141 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>邮箱池 · reg-factory</title><link rel="stylesheet" href="/static/onboarding.css"><script src="/static/onboarding-pools.js" defer></script></head>
-<body><a class="skip-link" href="#main">跳到主内容</a><div class="shell pool-shell">
-<header class="topbar"><div class="brand">reg-factory <span class="badge">隔离合成</span></div><div class="actions"><span id="operator" class="muted">正在核验会话</span><button id="logout" type="button" disabled>退出登录</button></div></header>
-<nav class="pool-nav" aria-label="控制面导航"><a href="/onboarding">底座诊断</a><a href="/onboarding/pools" aria-current="page">邮箱池</a><a href="#global-config">全局配置</a><a href="#batch-card">创建批次</a><a href="#tasks-card">任务列表</a></nav>
-<main id="main"><section class="hero"><p class="eyebrow">Google Cloud · 邮箱纵切</p><h1>邮箱池</h1><p class="muted">隔离合成环境 · 真实流程关闭。列表、导入和任务读取连接当前受保护 API；受理不代表注册成功。</p></section>
-<div id="message" class="message" role="status" aria-live="polite" hidden></div><p id="login-link" hidden><a href="/login?reason=expired">会话已失效，重新登录</a></p>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>reg-factory · 任务工作台</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/onboarding-shell.css">
+  <script src="/static/onboarding-pools.js" defer></script>
+  <script src="/static/onboarding-shell.js" defer></script>
+  <script src="/static/onboarding-cards.js" defer></script>
+</head>
+<body class="onboarding-console">
+<a class="skip-link" href="#main">跳到主内容</a>
+<header class="topbar">
+  <div class="brand-row">
+    <button id="shell-menu" class="menu-toggle" type="button" aria-label="打开任务菜单" aria-controls="shell-sidebar" aria-expanded="false"><span aria-hidden="true">☰</span></button>
+    <div class="brand"><span class="brand-mark" aria-hidden="true">RF</span><span>reg-factory</span></div>
+  </div>
+  <div class="top-actions"><span class="badge environment">隔离合成 · 真实流程关闭</span><span id="operator" class="muted">正在核验会话</span><button id="logout" type="button" disabled>退出登录</button></div>
+</header>
+<div class="layout">
+  <button id="shell-backdrop" class="nav-backdrop" type="button" aria-label="关闭任务菜单" tabindex="-1"></button>
+  <nav id="shell-sidebar" class="sidebar" aria-label="控制面导航">
+    <a class="contact-button" href="/" target="_blank" rel="noopener noreferrer">返回原控制台（新标签） ↗</a>
+    <div class="sidebar-title"><span>任务库</span><span class="task-count">合成</span></div>
+    <div class="script-nav">
+      <div class="sidebar-label">Google Cloud</div>
+      <a class="scriptbtn" href="#batch-card" data-shell-target="batch-card">Google 开通任务</a>
+      <a class="scriptbtn" href="#tasks-card" data-shell-target="tasks-card">任务列表与状态</a>
+      <p class="sidebar-copy">只接入受保护合成任务；真实开通尚未接入。</p>
+    </div>
+    <div class="sidebar-tools">
+      <div class="sidebar-label">工具</div>
+      <a class="navbtn" href="#mailbox-card" data-shell-target="mailbox-card"><span class="nav-icon" aria-hidden="true">@</span><span>邮箱池</span></a>
+      <a class="navbtn" href="#card-pool" data-shell-target="card-pool"><span class="nav-icon" aria-hidden="true">CC</span><span>信用卡池</span><span class="nav-state">待接</span></a>
+      <a class="navbtn" href="#global-config" data-shell-target="global-config"><span class="nav-icon" aria-hidden="true">CFG</span><span>全局配置</span></a>
+      <a class="navbtn" href="#network-panel" data-shell-target="network-panel"><span class="nav-icon" aria-hidden="true">IP</span><span>网络出口</span><span class="nav-state">待接</span></a>
+      <a class="navbtn" href="#legacy-tools" data-shell-target="legacy-tools"><span class="nav-icon" aria-hidden="true">…</span><span>原项目其他能力</span><span class="nav-state">隔离</span></a>
+    </div>
+    <div class="sidebar-footer"><p class="sidebar-copy">保护模式 · 数据来自当前 API<br>不连接旧明文池或旧执行入口</p><a class="contact-button" href="/onboarding">维护：底座诊断 <span aria-hidden="true">↗</span></a></div>
+  </nav>
+  <main id="main" class="content" tabindex="-1">
+    <div class="shell-alerts"><div id="message" class="message" role="status" aria-live="polite" hidden></div><p id="login-link" hidden><a href="/login?reason=expired">会话已失效，重新登录</a></p>
 <section id="reconcile-card" class="notice" hidden aria-label="未决请求"><h2>提交结果待核对</h2><p id="reconcile-note"></p><button id="reconcile-request" type="button" disabled>明确使用原请求键与原内容核对</button><p class="footnote">不会自动重试、换键或创建新的批次。非秘密请求只保留在本页内存；离开页面后请由管理员核对记录。</p></section>
-<section class="card"><div class="row"><h2>统一邮箱列表</h2><span class="badge">占用状态仅为观察</span></div>
+</div>
+<section id="mailbox-card" class="panel card" tabindex="-1"><div class="row"><h2>统一邮箱列表</h2><span class="badge">占用状态仅为观察</span></div>
 <div class="pool-tabs" role="tablist" aria-label="邮箱管理"><button id="tab-list" role="tab" aria-controls="panel-list" aria-selected="true" type="button">列表</button><button id="tab-import" role="tab" aria-controls="panel-import" aria-selected="false" tabindex="-1" type="button">导入</button><button id="tab-history" role="tab" aria-selected="false" type="button" disabled title="完整使用记录尚未接入">使用记录 · 待接</button></div>
 <section id="panel-list" role="tabpanel" aria-labelledby="tab-list">
 <form id="filter-form" method="get" action="/onboarding/pools"><div class="pool-filters"><div><label for="platform">平台</label><select id="platform"><option value="all">全部平台</option><option value="google">Google</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="grok">Grok</option><option value="kiro">Kiro</option><option value="github">GitHub</option><option value="k12">K12</option></select></div><div><label for="search">邮箱搜索</label><input id="search" maxlength="320" autocomplete="off"></div><div><label for="filter-group">分组</label><input id="filter-group" maxlength="128" autocomplete="off" placeholder="全部分组"></div><div><label for="health">健康状态</label><select id="health"><option value="">全部状态</option><option>UNKNOWN</option><option>HEALTHY</option><option>NEEDS_REVIEW</option><option>DISABLED</option></select></div><div><label for="occupied">逻辑占用</label><select id="occupied"><option value="">全部</option><option value="true">占用中</option><option value="false">未观察到占用</option></select></div></div><button id="filter-submit" type="submit" data-permission="onboarding:read" disabled>查询 / 刷新</button></form>
-<p id="mailbox-state" class="muted" role="status">正在加载本人邮箱…</p><div id="mailbox-list" class="pool-list"></div><button id="mailbox-next" type="button" disabled>下一页邮箱</button>
+<div class="mailbox-list-toolbar"><p id="mailbox-state" class="muted" role="status">正在加载本人邮箱…</p><span id="mailbox-selection-summary" class="muted"></span></div>
+<div id="mailbox-table-scroll" tabindex="0" role="region" aria-label="邮箱列表，可滚动">
+<table class="mailbox-table"><thead><tr><th scope="col"><input id="mailbox-select-page" type="checkbox" aria-label="全选当前页邮箱" disabled></th><th scope="col">邮箱</th><th scope="col">分组</th><th scope="col">健康 / 分配</th><th scope="col">逻辑占用</th><th scope="col">操作</th></tr></thead><tbody id="mailbox-list"></tbody></table>
+</div>
+<div class="mailbox-pagination"><label for="mailbox-page-size">每页</label><select id="mailbox-page-size" aria-label="每页邮箱数量"><option value="25">25 条</option><option value="50" selected>50 条</option><option value="100">100 条</option></select><span id="mailbox-page-label" class="muted">第 1 页</span><button id="mailbox-prev" type="button" disabled>上一页</button><button id="mailbox-next" type="button" disabled>下一页邮箱</button></div>
+<dialog id="mailbox-detail" aria-labelledby="mailbox-detail-title"><div class="mailbox-detail-heading"><h2 id="mailbox-detail-title">邮箱详情</h2><button id="mailbox-detail-close" type="button" aria-label="关闭邮箱详情">关闭</button></div><div id="mailbox-detail-content"></div></dialog>
 <p class="footnote">UNKNOWN / HISTORY_UNRECONCILED 不等于可用。停用仅阻止新分配，已有任务和资源占用不会释放。平台筛选不建立平台绑定。</p></section>
-<section id="panel-import" role="tabpanel" aria-labelledby="tab-import" hidden><h3>合成邮箱文本导入</h3><p class="muted">只接受隔离合成凭据。支持现有兼容文本 / JSON 格式；不要输入真实账号秘密。导入后仍保留 UNKNOWN 和未核清历史，不自动获得使用资格。</p>
-<form id="import-form" method="post" action="/api/onboarding/mailboxes/import-preview" autocomplete="off"><div class="field"><label for="import-group">导入分组</label><input id="import-group" value="fixture:group" maxlength="128" autocomplete="off"></div><div class="field"><label for="import-text">合成导入文本（仅本页内存）</label><textarea id="import-text" rows="5" spellcheck="false" autocomplete="off" aria-describedby="import-help"></textarea><p id="import-help" class="footnote">原文仅在预览 → 确认期间保留；确认完成、失败、取消、切出导入或会话失效后清空。预览不回显口令与令牌。</p></div><div class="actions"><button id="preview-import" class="primary" type="submit" disabled>预览与检查</button><button id="cancel-import" type="button">取消并清空</button><button type="button" disabled title="凭据更新与轮换尚未接入">覆盖更新 / 换密 · 待接</button></div></form>
-<div id="import-preview" class="pool-preview" aria-live="polite"></div><button id="confirm-import" type="button" class="primary" disabled>确认导入 · 相同凭据仅跳过</button></section></section>
-<section id="global-config" class="card"><div class="row"><h2>全局配置</h2><button id="load-config" type="button" data-permission="config:manage" disabled>读取最新配置</button></div><p class="muted">保存生成新版本，仅影响新批次；旧任务保留原配置。数值只保存配置，尚未启动 worker、留存清理或外部服务。</p><p id="config-state" role="status">需要 config:manage 权限。</p>
-<form id="config-form" method="post" action="/api/onboarding/config"><fieldset id="config-fields" disabled><legend>合成配置 · 无秘密字段</legend><div class="pool-filters"><div><label for="config-model">模型</label><input id="config-model" required value="fixture-model" pattern="fixture-[a-z0-9][a-z0-9-]{0,63}"></div><div><label for="config-region">区域</label><input id="config-region" required value="fixture-region" pattern="fixture-[a-z0-9][a-z0-9-]{0,63}"></div><div><label for="config-instance_ref">Sub2API 实例</label><select id="config-instance_ref"><option value="fixture:sub2api">fixture:sub2api（未接真实服务）</option></select></div><div><label for="config-group_ref">目标分组</label><select id="config-group_ref"><option value="fixture:group">fixture:group</option><option value="fixture:group-alt">fixture:group-alt</option></select></div><div><label for="config-project_prefix">项目前缀</label><input id="config-project_prefix" required value="fixture-project" pattern="fixture-[a-z0-9][a-z0-9-]{0,63}"></div><div><label for="config-timeout_seconds">超时秒数</label><input id="config-timeout_seconds" type="number" min="30" max="86400" step="1" required value="300"></div><div><label for="config-concurrency">并发数</label><input id="config-concurrency" type="number" min="1" max="32" step="1" required value="1"></div><div><label for="config-retention_days">留存天数</label><input id="config-retention_days" type="number" min="1" max="365" step="1" required value="7"></div></div></fieldset><button id="save-config" type="submit" class="primary" disabled>保存为新配置版本</button></form></section>
-<section id="batch-card" class="card"><h2>预检与创建批次</h2><p class="muted">仅 Google 合成任务。指定选择或自动分配均要求足量 N，不能自动缩水；预检不锁资源、不保证后续创建成功。</p><form id="batch-form" method="post" action="/api/onboarding/preflight"><div class="pool-filters"><div><label for="selection">选择方式</label><select id="selection"><option value="automatic">自动分配 N 个</option><option value="specified">使用列表勾选邮箱</option></select></div><div><label for="requested-count">要求数量 N（1–100）</label><input id="requested-count" type="number" value="1" min="1" max="100" step="1" required></div></div><p id="selected-count" class="muted">已选择 0 个邮箱</p><button id="preflight" type="submit" disabled>只读预检</button></form><div id="preflight-result" class="notice" aria-live="polite">先预检，再明确确认。导入记录通常因资格未知 / 历史未核清而不能创建。</div><button id="confirm-batch" type="button" class="primary" disabled>明确确认 · 创建足量合成批次</button><div id="batch-result" class="pool-preview" aria-live="polite"></div></section>
-<section id="tasks-card" class="card"><div class="row"><h2>任务列表</h2><button id="refresh-tasks" type="button" data-permission="onboarding:read" disabled>刷新任务列表</button></div><form id="task-filter-form" method="get" action="/onboarding/pools"><div class="pool-filters"><div><label for="task-scope">任务范围</label><select id="task-scope"><option value="all">全部本人任务</option><option value="pool">邮箱池</option><option value="fixture">原离线诊断</option></select></div><div><label for="task-batch">批次 ID（可选）</label><input id="task-batch" maxlength="36" autocomplete="off"></div></div><button type="submit" data-permission="onboarding:read" disabled>筛选任务</button></form><p id="task-list-state" class="muted" role="status">正在加载本人任务…</p><div id="task-list" class="pool-list"></div><button id="task-next" type="button" disabled>下一页任务</button>
-<h3 class="divider">任务详情</h3><p id="command-receipt" class="mono" role="status"></p><p id="task-empty" class="muted">选择一条任务，按最新版本操作。</p><dl id="task-facts" class="facts" hidden></dl><div class="actions"><button id="refresh-task" type="button" disabled>刷新当前任务</button><button id="pause-task" type="button" disabled>暂停任务</button><button id="cancel-task" type="button" class="danger" disabled>请求取消</button><button id="recheck-task" type="button" disabled>排入只读核验</button></div><p class="footnote">命令 202 只代表已受理，随后独立读取最新状态。取消不回滚外部结果、不释放旧 hold；核验只排标记，不执行核验或恢复任务。</p></section>
-<section class="card"><h2>后续能力仍未接入</h2><div class="actions"><button type="button" disabled>卡池管理 · 待接</button><button type="button" disabled>完整使用记录 · 待接</button><button type="button" disabled>真实核验 / worker · 待接</button></div><p class="footnote">完整目标仍包含凭据更新与轮换、卡 CRUD、使用历史、inspector、worker 和旧消费者共享池切换。本页不以合成纵切替代这些目标，也不提供假成功入口。</p></section>
-</main><footer class="footnote">P1c · 保护模式 · 所有结果来自当前 API；依赖不可用时关闭操作，不切换到演示数据。</footer></div></body></html>
+<section id="panel-import" role="tabpanel" aria-labelledby="tab-import" hidden>
+<div class="mail-import-heading"><h3>导入邮箱</h3><p class="muted">粘贴邮箱资料，每行一条；也支持 JSON。检查通过后再导入。</p></div>
+<p id="import-environment" class="mail-import-environment">当前仅接受测试凭据，不要填写真实邮箱密码或令牌。</p>
+<details id="import-formats" class="mail-import-formats"><summary>支持格式与示例</summary>
+<p>文本格式：邮箱地址----邮箱密码（每行一条）</p><pre>demo@fixture.invalid----fixture:password</pre>
+<p>JSON 格式：对象或对象数组</p><pre>[{"email":"demo@fixture.invalid","password":"fixture:password","provider":"outlook"}]</pre>
+<p class="footnote">以上仅为测试示例，不会自动填入或提交。每次最多 1000 条、256 KiB；测试邮箱使用 fixture.invalid 域名，密码使用 fixture: 前缀。</p>
+</details>
+<form id="import-form" method="post" action="/api/onboarding/mailboxes/import-preview" autocomplete="off">
+<div class="field mail-import-group"><label for="import-group">导入分组 <span class="muted">（可选）</span></label><input id="import-group" placeholder="请输入分组名称，留空不分组" maxlength="128" autocomplete="off"></div>
+<div id="import-secret-fields" class="field"><label for="import-text">邮箱资料</label><textarea id="import-text" rows="7" placeholder="每行一条，例如：&#10;demo@fixture.invalid----fixture:password" spellcheck="false" autocomplete="off" aria-describedby="import-help import-environment"></textarea><p id="import-help" class="footnote">密码与令牌不会显示在检查结果中。完成、失败、清空或离开导入页后，输入内容会清除。</p></div>
+<div class="actions mail-import-actions"><button id="preview-import" class="primary" type="submit" disabled>检查资料</button><button id="cancel-import" type="button">清空</button></div></form>
+<div id="import-preview" class="pool-preview" aria-live="polite"></div><button id="confirm-import" type="button" class="primary" hidden disabled>导入</button>
+<p class="footnote mail-import-rules">已有相同资料会自动跳过，不覆盖已有记录；本次文本内的重复或冲突行需先修正。导入后仍需核验账号状态，不能直接用于开通。</p>
+</section></section>
+<div id="task-workbench">
+<section id="batch-card" class="panel card" tabindex="-1">
+<div class="form-head"><span class="form-eyebrow">GOOGLE CLOUD</span><h2 class="form-title">Google 开通任务</h2><p class="form-desc">填写参数，运行任务，在右侧查看状态与记录。</p></div>
+<p id="live-source-state" class="notice" role="status" hidden></p>
+<form id="batch-form" method="post" action="/api/onboarding/preflight">
+<div class="field"><label for="google-execution-mode">执行模式</label><select id="google-execution-mode" aria-describedby="google-mode-help"><option value="synthetic" selected>任务编排</option><option value="real" disabled>完整执行 · 尚未接入</option></select><p id="google-mode-help" class="footnote">执行服务尚未接入；当前仅预检、创建任务记录与管理状态，不注册 Google、不绑卡、不申请赠金，也不调用模型。</p></div>
+<div class="pool-filters"><div><label for="selection">选择方式</label><select id="selection"><option value="automatic">自动分配 N 个</option><option value="specified">使用列表勾选邮箱</option></select></div><div><label for="requested-count">要求数量 N（1–100）</label><input id="requested-count" type="number" value="1" min="1" max="100" step="1" required></div></div>
+<p id="selected-count" class="muted">已选择 0 个邮箱</p><p class="muted"><a href="#mailboxes">前往邮箱池选择邮箱</a></p>
+<div class="google-run-actions"><button id="run-google" type="button" class="primary" disabled>运行任务</button><p class="footnote">点击运行 → 自动预检 → 通过即提交 → 右侧查看。预检不通过时不创建任务。</p></div>
+<details id="google-advanced" class="google-disclosure"><summary>高级检查 · 分步预检与确认</summary><p class="footnote">需要排查时可以分步操作。指定选择或自动分配都必须满足足量 N，不会自动缩减数量。</p><button id="preflight" type="submit" disabled>只读预检</button><div id="preflight-result" class="notice" aria-live="polite">先预检，再明确确认。导入记录通常因资格未知 / 历史未核清而不能创建。</div><button id="confirm-batch" type="button" class="primary" disabled>确认创建批次</button></details>
+</form><div id="batch-result" class="pool-preview" aria-live="polite"></div>
+</section>
+<section id="tasks-card" class="panel card log-panel" tabindex="-1">
+<div class="row google-log-head"><div><h2>运行日志</h2><span id="google-log-state" class="badge">尚未选择任务</span></div><button id="refresh-google-log" type="button" data-permission="onboarding:read" disabled>刷新日志</button></div>
+<p id="google-run-status" class="muted" role="status" aria-live="polite">等待运行任务，或从历史中选择一条任务。</p>
+<div id="google-log" class="log" role="log" aria-label="Google 任务操作与服务端记录" aria-live="polite" aria-relevant="additions text" tabindex="0"><p class="google-log-empty">暂无任务记录。点击左侧“运行任务”开始；也可展开下方历史查看已有任务。</p></div>
+<p id="worker-log-notice" class="footnote">这里显示本页操作与服务端任务记录，不是执行进程的实时输出；任务已创建不代表 Google 已开通。</p>
+<h3 class="divider">当前任务</h3><p id="command-receipt" class="mono" role="status"></p><p id="task-empty" class="muted">运行后自动查看首条任务，或从下方历史选择一条任务。</p><dl id="task-facts" class="facts" hidden></dl><div class="actions"><button id="refresh-task" type="button" disabled>刷新当前任务</button><button id="pause-task" type="button" disabled>暂停任务</button><button id="cancel-task" type="button" class="danger" disabled>请求取消</button><button id="recheck-task" type="button" disabled>排入只读核验</button></div><p class="footnote">命令 202 只代表已受理，随后独立读取最新状态。取消不回滚外部结果；仅核验从未执行的任务会安全结束并释放邮箱，其余保留占用；核验只排标记，不执行核验或恢复任务。</p>
+<details id="task-history" class="google-disclosure"><summary>历史任务 · 筛选与查看</summary><div class="row"><h3>任务列表</h3><button id="refresh-tasks" type="button" data-permission="onboarding:read" disabled>刷新任务列表</button></div><form id="task-filter-form" method="get" action="/onboarding/pools"><div class="pool-filters"><div><label for="task-scope">任务范围</label><select id="task-scope"><option value="all">全部本人任务</option><option value="pool">邮箱池</option><option value="fixture">原离线诊断</option></select></div><div><label for="task-batch">批次 ID（可选）</label><input id="task-batch" maxlength="36" autocomplete="off"></div></div><button type="submit" data-permission="onboarding:read" disabled>筛选任务</button></form><p id="task-list-state" class="muted" role="status">正在加载本人任务…</p><div id="task-list" class="pool-list"></div><button id="task-next" type="button" disabled>下一页任务</button></details>
+</section>
+</div>
+<section id="global-config" class="panel card" tabindex="-1"><div class="row"><h2>全局配置</h2><button id="load-config" type="button" data-permission="config:manage" disabled>读取最新配置</button></div><p class="muted">保存生成新版本，仅影响新批次；旧任务保留原配置。数值只保存配置，尚未启动 worker、留存清理或外部服务。</p><p id="config-state" role="status">需要 config:manage 权限。</p>
+<form id="config-form" method="post" action="/api/onboarding/config"><fieldset id="config-fields" disabled><legend id="config-legend">合成配置 · 无秘密字段</legend><div id="synthetic-config-values" class="pool-filters"><div><label for="config-model">模型</label><input id="config-model" required value="fixture-model" pattern="fixture-[a-z0-9][a-z0-9-]{0,63}"></div><div><label for="config-region">区域</label><input id="config-region" required value="fixture-region" pattern="fixture-[a-z0-9][a-z0-9-]{0,63}"></div><div><label for="config-instance_ref">Sub2API 实例</label><select id="config-instance_ref"><option value="fixture:sub2api">fixture:sub2api（未接真实服务）</option></select></div><div><label for="config-group_ref">目标分组</label><select id="config-group_ref"><option value="fixture:group">fixture:group</option><option value="fixture:group-alt">fixture:group-alt</option></select></div><div><label for="config-project_prefix">项目前缀</label><input id="config-project_prefix" required value="fixture-project" pattern="fixture-[a-z0-9][a-z0-9-]{0,63}"></div><div><label for="config-timeout_seconds">超时秒数</label><input id="config-timeout_seconds" type="number" min="30" max="86400" step="1" required value="300"></div><div><label for="config-concurrency">并发数</label><input id="config-concurrency" type="number" min="1" max="32" step="1" required value="1"></div><div><label for="config-retention_days">留存天数</label><input id="config-retention_days" type="number" min="1" max="365" step="1" required value="7"></div></div>
+<div id="live-config-values" hidden>
+<p class="notice">已有结算账号云资源链：不注册 Google、不申请试用、不绑卡或申请赠金；Sub2API 导入保持停用，不调用模型或启用调度。</p>
+<details id="legacy-config-snapshot" hidden><summary>当前旧配置（只读）</summary><pre id="legacy-config-fields"></pre></details>
+<div class="pool-filters">
+<div><label for="live-config-billing_account">已有结算账号 ID</label><input id="live-config-billing_account" maxlength="20" pattern="[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}" autocomplete="off" placeholder="XXXXXX-XXXXXX-XXXXXX"></div>
+<div><label for="live-config-project_prefix">专用项目前缀</label><input id="live-config-project_prefix" maxlength="12" pattern="[a-z]([a-z0-9-]{0,10}[a-z0-9])?" autocomplete="off"></div>
+<div><label for="live-config-service_account_prefix">服务账号前缀</label><input id="live-config-service_account_prefix" maxlength="12" pattern="[a-z]([a-z0-9-]{0,10}[a-z0-9])?" autocomplete="off"></div>
+</div><p class="footnote">固定区域 us-central1 · roles/aiplatform.user · local-authorized-google · local-sub2api-approved / 分组 2 · 超时 180 秒 · 并发 1。页面不能改目标、账号、路径或权限。</p>
+</div></fieldset><button id="save-config" type="submit" class="primary" disabled>保存为新配置版本</button></form></section>
+<section id="card-pool" class="panel card" tabindex="-1">
+<div class="row"><div><span class="form-eyebrow">CARD INVENTORY · 本人数据</span><h2>信用卡池</h2></div><span class="badge">合成数据存储 · 非真实支付</span></div>
+<p class="notice">当前保留 synthetic_only 合成金库策略：只接受隔离测试卡和合成账单标识，禁止录入真实银行卡。不会查询余额、扣款、读取验证码或连接真实银行；CVV / OTP 不收集、不保存。</p>
+<div class="pool-tabs" role="tablist" aria-label="信用卡管理"><button id="card-tab-list" role="tab" aria-controls="card-panel-list" aria-selected="true" type="button">卡片列表</button><button id="card-tab-manual" role="tab" aria-controls="card-panel-manual" aria-selected="false" tabindex="-1" type="button">手动添加</button><button id="card-tab-csv" role="tab" aria-controls="card-panel-csv" aria-selected="false" tabindex="-1" type="button">CSV 导入</button></div>
+<section id="card-panel-list" role="tabpanel" aria-labelledby="card-tab-list">
+<form id="card-filter" method="get" action="/api/onboarding/cards"><div class="pool-filters"><div><label for="card-search">搜索别名 / 尾号（不要输入完整卡号）</label><input id="card-search" maxlength="80" autocomplete="off"></div><div><label for="card-enabled">启用状态</label><select id="card-enabled"><option value="">全部状态</option><option value="true">已启用</option><option value="false">已停用</option></select></div></div><button id="card-search-submit" type="submit" disabled>查询 / 刷新卡片</button></form>
+<p id="card-state" class="muted" role="status">打开卡片列表后读取本人数据；需要 cards:manage 权限。</p>
+<div id="card-table-scroll" tabindex="0" role="region" aria-label="信用卡列表，可滚动"><table class="card-table"><thead><tr><th scope="col">别名</th><th scope="col">品牌 / 尾号</th><th scope="col">状态</th><th scope="col">已绑定 / 上限</th><th scope="col">预留</th><th scope="col">剩余名额</th><th scope="col">操作</th></tr></thead><tbody id="card-list"></tbody></table></div>
+<div class="card-pagination"><label for="card-page-size">每页</label><select id="card-page-size"><option value="25">25 条</option><option value="50" selected>50 条</option><option value="100">100 条</option></select><span id="card-page-label">第 1 页</span><button id="card-prev" type="button" disabled>上一页</button><button id="card-next" type="button" disabled>下一页</button></div>
+<dialog id="card-detail" aria-labelledby="card-detail-title"><div class="card-detail-heading"><h2 id="card-detail-title">卡片详情</h2><button id="card-detail-close" type="button" aria-label="关闭卡片详情">关闭</button></div><div id="card-detail-content"></div>
+<form id="card-edit-form" class="pool-item" method="post" action="/api/onboarding/cards" autocomplete="off" hidden><h3 id="card-edit-title">编辑卡片管理信息</h3><p class="footnote">卡号不可修改；绑定数、预留数、核对标记只读。短信引用只支持明确替换，不回显旧值。</p><div class="pool-filters"><div><label for="card-edit-alias">卡片别名</label><input id="card-edit-alias" maxlength="80" required autocomplete="off"></div><div><label for="card-edit-limit">绑定上限</label><input id="card-edit-limit" type="number" min="1" max="10000" step="1" required></div></div><label class="pool-check"><input id="card-replace-sms" type="checkbox">明确替换短信通道引用（留空则清除）</label><label for="card-edit-sms">新的短信通道引用</label><input id="card-edit-sms" type="password" maxlength="128" autocomplete="off" disabled><div class="actions"><button id="card-save" type="submit" class="primary" disabled>保存管理信息</button><button id="card-edit-cancel" type="button">取消编辑</button></div></form>
+</dialog>
+<p class="footnote">剩余名额指可关联的账号数量，不是银行卡余额。余量 = 上限 − 已绑定 − 预留，仅为当前观察，不是锁定或分配许可。核对未完成、停用或余量不足都不能视为可分配。停用不会释放旧预留和绑定。分配器 / 绑定 worker 尚未接入；“最少绑定优先、同一账号仅一张有效绑定”是待执行规则，不代表本页已实施自动分配。</p>
+</section>
+<section id="card-panel-manual" role="tabpanel" aria-labelledby="card-tab-manual" hidden><h3>手动添加合成卡片</h3><p class="muted">所有账单资料由你填写，不自动编造。与 CSV 使用同一套预览、去重和确认流程。切换标签或离开本页会清空输入。</p><details><summary>当前合成输入约束</summary><p class="footnote">持卡人 fixture:holder；国家 US；地址 fixture:line；城市 fixture:city；地区 fixture:region；邮编 fixture:postal；可选地址第 2 行 fixture:line2。到期年仅 2099。只接受金库策略允许的合成测试卡号，不接受真实数据；这里不会自动填入示例。</p></details><form id="card-manual-form" method="post" action="/api/onboarding/cards/import-preview" autocomplete="off"><div class="pool-filters"><div><label for="card-manual-alias">卡片别名</label><input id="card-manual-alias" name="alias" type="text" maxlength="80" autocomplete="off" required></div>
+<div><label for="card-manual-pan">合成测试卡号（不会回显）</label><input id="card-manual-pan" name="pan" type="password" maxlength="19" autocomplete="off" required></div>
+<div><label for="card-manual-expiry_month">到期月（1–12）</label><input id="card-manual-expiry_month" name="expiry_month" type="number" maxlength="2" autocomplete="off" required min="1" max="12" step="1"></div>
+<div><label for="card-manual-expiry_year">到期年（合成策略仅 2099）</label><input id="card-manual-expiry_year" name="expiry_year" type="number" maxlength="4" autocomplete="off" required min="2099" max="2099" step="1"></div>
+<div><label for="card-manual-holder_name">持卡人（合成标识）</label><input id="card-manual-holder_name" name="holder_name" type="text" maxlength="80" autocomplete="off" required></div>
+<div><label for="card-manual-country">账单国家</label><input id="card-manual-country" name="country" type="text" maxlength="2" autocomplete="off" required></div>
+<div><label for="card-manual-address_line1">账单地址第 1 行</label><input id="card-manual-address_line1" name="address_line1" type="text" maxlength="128" autocomplete="off" required></div>
+<div><label for="card-manual-address_line2">账单地址第 2 行（可选）</label><input id="card-manual-address_line2" name="address_line2" type="text" maxlength="128" autocomplete="off"></div>
+<div><label for="card-manual-city">城市</label><input id="card-manual-city" name="city" type="text" maxlength="80" autocomplete="off" required></div>
+<div><label for="card-manual-region">地区</label><input id="card-manual-region" name="region" type="text" maxlength="80" autocomplete="off" required></div>
+<div><label for="card-manual-postal_code">邮编</label><input id="card-manual-postal_code" name="postal_code" type="text" maxlength="80" autocomplete="off" required></div>
+<div><label for="card-manual-account_limit">绑定上限（1–10000）</label><input id="card-manual-account_limit" name="account_limit" type="number" maxlength="5" autocomplete="off" required min="1" max="10000" step="1"></div>
+<div><label for="card-manual-sms_channel_ref">短信通道引用（可选）</label><input id="card-manual-sms_channel_ref" name="sms_channel_ref" type="password" maxlength="128" autocomplete="off"></div>
+</div><div class="actions"><button id="card-preview-manual" class="primary" type="submit" disabled>预览与检查</button><button class="card-clear" type="button">取消并清空</button></div></form></section>
+<section id="card-panel-csv" role="tabpanel" aria-labelledby="card-tab-csv" hidden><h3>CSV 批量导入</h3><p class="muted">最多 1000 条、256 KiB；下载仅含表头的模板。完整卡号与账单原文仅在本页内存，预览只显示尾号与配置状态。</p><button id="card-template" type="button" disabled>下载空白 CSV 模板</button><form id="card-csv-form" method="post" action="/api/onboarding/cards/import-preview" autocomplete="off"><div class="field"><label for="card-file">选择 CSV 文件（可选）</label><input id="card-file" type="file" accept=".csv,text/csv"></div><div class="field"><label for="card-csv">合成 CSV 原文</label><textarea id="card-csv" rows="7" spellcheck="false" autocomplete="off"></textarea></div><div class="actions"><button id="card-preview-csv" class="primary" type="submit" disabled>预览与检查</button><button class="card-clear" type="button">取消并清空</button></div></form></section>
+<div id="card-confirm-area" hidden><div id="card-preview" class="pool-preview" aria-live="polite"></div><button id="card-confirm" class="primary" type="button" disabled>明确确认导入</button><p class="footnote">预览不写数据库。相同卡片只跳过，冲突不会覆盖；提交后不会自动启用分配流程。导入失败或结果未知会清空原文，核对必须重新提供同一份输入和原请求键。</p></div>
+</section>
+<section id="network-panel" class="panel card" tabindex="-1"><h2>网络出口</h2><p class="muted">原项目有网络工具，但受保护、脱敏、可审计的网络适配尚未接入。本页不读取旧代理凭据，不提供切换出口、连接测试或“干净 IP”承诺。</p></section>
+<section id="legacy-tools" class="panel card" tabindex="-1"><h2>原项目其他能力 · 尚未接入</h2><p class="muted">资产 API、Codex K12、Plus 导入与其他旧任务保持保护模式隔离，不在本页启用。完整使用记录、凭据更新与轮换、inspector、worker 和旧消费者共享池切换仍未完成；本页不以合成纵切替代这些目标。</p></section>
+<footer class="footnote">测试数据 · 真实开通服务尚未接入；现有邮箱与卡片数据未迁移。</footer>
+  </main>
+</div>
+</body>
+</html>

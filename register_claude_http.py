@@ -26,6 +26,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import SSLError
 
 from common.file_lock import append_line
+from common.managed_mailboxes import MailboxBoundaryError
 from common.session_export import save_claude_token
 from common.temp_email import create_mailbox, fetch_messages
 from config import (
@@ -372,11 +373,13 @@ def register_one(
     if not email:
         mailbox = _mailbox_for_account(provider, domain)
         email = str(mailbox["email"])
-    elif refresh_token:
+    else:
         try:
             from common.emails import mark_registration_started
 
             mark_registration_started("claude", email, password)
+        except MailboxBoundaryError:
+            raise
         except Exception:
             pass
     client = ClaudeProtocolClient(seed=email, proxy=proxy, protocol_version=protocol_version)

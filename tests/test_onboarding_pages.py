@@ -37,3 +37,16 @@ class PageTests(unittest.TestCase):
         self.assertIn('crypto.randomUUID()', script)
         self.assertIn('expected_version', script)
         self.assertIn('COMMIT_UNKNOWN', script)
+
+    def test_business_shell_reuses_original_styles_without_legacy_bootstrap(self):
+        html = (STATIC / 'onboarding-pools.html').read_text()
+        for asset in ('style.css', 'onboarding-shell.css', 'onboarding-shell.js'):
+            self.assertIn('/static/' + asset, html)
+            self.assertTrue((STATIC / asset).is_file(), asset)
+        self.assertNotIn('/static/app.js', html)
+        self.assertNotIn('/static/onboarding.css', html)
+        for structure in ('class="brand-mark"', 'class="layout"', 'class="sidebar"',
+                          'class="sidebar-tools"', 'id="task-workbench"'):
+            self.assertIn(structure, html)
+        for forbidden in ('localStorage', 'sessionStorage', 'innerHTML', 'fetch(', '/api/'):
+            self.assertNotIn(forbidden, (STATIC / 'onboarding-shell.js').read_text())

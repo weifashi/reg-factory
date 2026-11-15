@@ -22,6 +22,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
 from common import emails as email_pool
+from common.managed_mailboxes import MailboxBoundaryError
 
 try:
     # Apply the same .env-backed default as register.py in this wrapper.
@@ -342,6 +343,8 @@ async def process_account(account, args, child_env):
     try:
         from common.emails import mark_registration_started
         mark_registration_started("tri", email, account[1] or "")
+    except MailboxBoundaryError:
+        raise
     except Exception as exc:
         print(f"  [email] sale exclusion warning for {email}: {str(exc)[:100]}")
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + email.split("@")[0][:8]

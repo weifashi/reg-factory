@@ -189,7 +189,7 @@ def _prepare_browser_options(browser_options=None):
     return options
 
 
-def create_browser_with_retry(bb, name, retries=3, **browser_options):
+def create_browser_with_retry(bb, name, retries=3, *, redact_errors=False, **browser_options):
     """创建 BitBrowser 窗口，带配额满自动清理 / 网络错误重试"""
     import time
     for attempt in range(retries):
@@ -198,21 +198,50 @@ def create_browser_with_retry(bb, name, retries=3, **browser_options):
         except Exception as e:
             msg = str(e)
             if any(k in msg.lower() for k in ["最大创建窗口数", "超过", "quota", "limit", "maximum", "exceed"]):
-                print("  窗口数量已满；为避免误删已有浏览器资料，已停止自动清理")
+                print("BROWSER_CREATE_QUOTA" if redact_errors else "  窗口数量已满；为避免误删已有浏览器资料，已停止自动清理")
                 return None
             if any(k in msg.lower() for k in ["tls", "socket", "econnreset", "network", "timeout"]):
-                print(f"  create browser network error (retry {attempt+1}/{retries}): {msg[:80]}")
+                print("BROWSER_CREATE_RETRY" if redact_errors else f"  create browser network error (retry {attempt+1}/{retries}): {msg[:80]}")
                 time.sleep(5)
                 continue
+            if redact_errors:
+                raise RuntimeError("BROWSER_CREATE_FAILED") from None
             raise
     return None
 
 
-async def open_and_connect(name, p=None, browser_options=None):
-    """创建并打开 BitBrowser 窗口，连接 Playwright 并注入 stealth。
+async def open_and_connect(name, p=None, browser_options=None, *, automation_mode="legacy"):
+    """Connect using the existing provider; normal errors expose fixed codes only.
+
+    BaseException signals (including cancellation and process exit) retain their
+    semantics. The implementation still cleans up the profile it owns before an
+    ordinary provider/CDP exception reaches this public error boundary.
+    """
+    try:
+        return await _open_and_connect(name, p=p, browser_options=browser_options,
+                                       automation_mode=automation_mode)
+    except Exception:
+        if automation_mode == "normal":
+            raise RuntimeError("BROWSER_OPEN_FAILED") from None
+        raise
+
+
+async def _open_and_connect(name, p=None, browser_options=None, *, automation_mode="legacy"):
+    """创建 provider 窗口并连接 Playwright；normal 模式不注入或过滤流量。
     返回 (bb, profile_id, browser, context, page)。
     注意：调用方需自行管理 async_playwright 生命周期，或传入 p。"""
-    browser_options = _prepare_browser_options(browser_options)
+    if automation_mode not in {"legacy", "normal"}:
+        raise ValueError("unsupported automation mode")
+    normal = automation_mode == "normal"
+    # Explicit ordinary automation: no fingerprint mutation, stealth injection,
+    # context request filtering, or disclosure of the CDP control endpoint.
+    # Provider launch-time traffic arguments must also be disabled by the caller.
+    if normal:
+        from common.traffic_saver import configured_mode
+        if configured_mode() == "extreme":
+            raise ValueError("normal automation requires non-extreme provider traffic mode")
+        install_shutdown_guard()
+    browser_options = dict(browser_options or {}) if normal else _prepare_browser_options(browser_options)
     provider = selected_browser_provider()
     if provider in {"cloak", "cloakbrowser"}:
         from common.cloak_browser import CloakBrowserHandle
@@ -220,7 +249,8 @@ async def open_and_connect(name, p=None, browser_options=None):
         handle = CloakBrowserHandle(None, profile_id="", name=name)
         try:
             handle, pid, context = await handle.launch(name, browser_options)
-            await install_traffic_saver(context)
+            if not normal:
+                await install_traffic_saver(context)
             startup_pages = list(context.pages)
             page = await asyncio.wait_for(context.new_page(), timeout=20)
             for startup_page in startup_pages:
@@ -232,7 +262,8 @@ async def open_and_connect(name, p=None, browser_options=None):
                 await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
             except Exception:
                 pass
-            await inject_stealth(context, page)
+            if not normal:
+                await inject_stealth(context, page)
             return handle, pid, handle.browser, context, page
         except BaseException:
             try:
@@ -242,7 +273,7 @@ async def open_and_connect(name, p=None, browser_options=None):
                 pass
             raise
     bb = BitBrowser()
-    pid = create_browser_with_retry(bb, name, **(browser_options or {}))
+    pid = create_browser_with_retry(bb, name, redact_errors=normal, **(browser_options or {}))
     if not pid:
         raise RuntimeError("create browser failed after retries")
     try:
@@ -258,24 +289,26 @@ async def open_and_connect(name, p=None, browser_options=None):
                 if "正在打开" in msg or "启动中" in msg or any(
                     marker in msg.lower() for marker in ("opening", "starting", "busy")
                 ):
-                    print(f"  BitBrowser still opening; retry {attempt+1}/{max_open}")
+                    print("BROWSER_OPEN_BUSY" if normal else f"  BitBrowser still opening; retry {attempt+1}/{max_open}")
                     await asyncio.sleep(6)
                     continue
                 if any(k in msg.lower() for k in ["tls", "socket", "econnreset", "network", "timeout", "disconnected", "未知错误"]):
-                    print(f"  open browser network error (retry {attempt+1}/{max_open}): {msg[:80]}")
+                    print("BROWSER_OPEN_RETRY" if normal else f"  open browser network error (retry {attempt+1}/{max_open}): {msg[:80]}")
                     await asyncio.sleep(6)
                     continue
                 raise
         if not data:
             raise RuntimeError("open browser failed after retries")
         ws = data["ws"]
-        print(f"  ws: {ws}")
+        if not normal:
+            print(f"  ws: {ws}")
         browser = await p.chromium.connect_over_cdp(ws)
         context = browser.contexts[0]
         # BitBrowser can expose a zero-sized startup/navigation tab while its
         # profile window is still settling. Install routing before creating a clean
         # registration tab and close only the stale startup pages.
-        await install_traffic_saver(context)
+        if not normal:
+            await install_traffic_saver(context)
         startup_pages = list(context.pages)
         page = await asyncio.wait_for(context.new_page(), timeout=20)
         for startup_page in startup_pages:
@@ -289,8 +322,9 @@ async def open_and_connect(name, p=None, browser_options=None):
         try:
             await context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
         except Exception as e:
-            print(f"  set Accept-Language failed: {e}")
-        await inject_stealth(context, page)
+            print("BROWSER_LANGUAGE_SETUP_FAILED" if normal else f"  set Accept-Language failed: {e}")
+        if not normal:
+            await inject_stealth(context, page)
         return bb, pid, browser, context, page
     except BaseException:
         # A failed CDP connection never reaches the caller's teardown block.

@@ -1,0 +1,28 @@
+{
+  "upstream": "https://github.com/Wei-Shaw/sub2api",
+  "tag": "v0.2.9",
+  "commit": "4c00df2e0183e2c70b7fa8ba45914205e36aad0c",
+  "patch_sha256": "5d4a9d10559ab55265cd5769c15031cda1e7afa7301dde3f252f9963711a6ac6",
+  "files": {
+    "backend/internal/handler/admin/account_handler.go": {
+      "base_sha256": "80a5268ffdf2f7f7f5b9fb9fb62ebc9644ea61855bd8e4de796123a3afa139df",
+      "patched_sha256": "9b68a952c8c5aa269cd8c2d70888ac2b7e25a7016c5b17821b56a99a27b5ff6a"
+    },
+    "backend/internal/service/admin_service.go": {
+      "base_sha256": "95b15e4380df4073837f81d1665a136c3c71724166b50e9cb2042dffa9f86cac",
+      "patched_sha256": "ec682c3449b06c60e63be8b94e9b96d81768e34fe2d37447dec66ed327168c0b"
+    },
+    "backend/internal/service/admin_account.go": {
+      "base_sha256": "dbe1b688310bb7a93213dba61a825aeaa400cd8457282819629659c526a12c48",
+      "patched_sha256": "9dabfaf61df328d1398a8063df4739e8e462fbace78ff0e74210e576300b51ce"
+    },
+    "backend/internal/handler/admin/account_create_disabled_test.go": {
+      "base_sha256": null,
+      "patched_sha256": "44f0fc2479283e333ecd3931119d594147d13e9b2f6c70f028c710fd4cafe6a1"
+    },
+    "backend/internal/service/admin_account_create_disabled_test.go": {
+      "base_sha256": null,
+      "patched_sha256": "208f6944e7294b08854959dbeb4bf49b0b1ce247c1ba6ffb07ac8ee8a7b0fece"
+    }
+  }
+}

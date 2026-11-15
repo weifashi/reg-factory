@@ -11,6 +11,9 @@ from .errors import ErrorCode, ServiceError
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 1 << 17, 8, 1
 _SCRYPT_MAXMEM = 256 * 1024 * 1024
 
+# Fixed 30-day lifetime shared with the HTTP cookies; never sliding.
+SESSION_LIFETIME_SECONDS = 30 * 24 * 60 * 60
+
 
 def normalize_username(username):
     if type(username) is not str or len(username) > 256:
@@ -193,20 +196,19 @@ def _from_token(conn, session_token, permission):
 
 
 def require(conn, session_token, permission):
-    """Authenticate and refresh idle after locks, never extending absolute expiry.
+    """Authenticate and audit activity without extending either stored deadline.
 
     A None permission is reserved for authentication-only endpoints (logout or
     session metadata); business services must name their concrete permission.
     """
     actor, session = _from_token(conn, session_token, permission)
     conn.execute('UPDATE operator_sessions SET '
-                 "idle_expires_at=LEAST(expires_at,clock_timestamp()+interval '30 minutes'),"
                  'version=version+1,updated_at=clock_timestamp() WHERE id=%s', (actor.session_id,))
     audit.append(conn, actor.operator_id, None, 'auth.session_touch', actor.session_id,
                  'OK', str(uuid4()), before_summary={'version': session['version']},
                  after_summary={'version': session['version'] + 1})
     # Audit INSERT may block past an absolute/idle deadline. No stale Actor
-    # escapes; failure rolls back both the refresh and its audit atomically.
+    # escapes; failure rolls back both the activity update and its audit atomically.
     return revalidate(conn, actor, permission)
 
 
@@ -384,10 +386,14 @@ def _new_session(conn, operator, previous_token):
                          'updated_at=clock_timestamp() WHERE id=%s', (previous['id'],))
             audit.append(conn, operator_id, None, 'auth.logout', str(previous['id']), 'ROTATED', str(uuid4()))
     token, csrf, session_id = secrets.token_urlsafe(32), secrets.token_urlsafe(32), str(uuid4())
-    conn.execute('INSERT INTO operator_sessions '
+    # Keep the legacy idle column for existing sessions and all downstream
+    # deadline checks. New sessions have exactly one deadline, evaluated once.
+    conn.execute("WITH lifetime AS (SELECT clock_timestamp() + %s * interval '1 second' AS deadline) "
+                 'INSERT INTO operator_sessions '
                  '(id,operator_id,token_hash,csrf_hash,auth_epoch,expires_at,idle_expires_at) '
-                 "VALUES(%s,%s,%s,%s,%s,clock_timestamp()+interval '8 hours',clock_timestamp()+interval '30 minutes')",
-                 (session_id, operator_id, _digest_token(token), _digest_token(csrf), operator['auth_epoch']))
+                 'SELECT %s,%s,%s,%s,%s,deadline,deadline FROM lifetime',
+                 (SESSION_LIFETIME_SECONDS, session_id, operator_id, _digest_token(token),
+                  _digest_token(csrf), operator['auth_epoch']))
     audit.append(conn, operator_id, None, 'auth.login', session_id, 'AUTHENTICATED', str(uuid4()))
     return LoginResult(Actor(operator_id, frozenset(operator['permissions']), session_id, operator['auth_epoch']), token, csrf)
 

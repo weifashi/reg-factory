@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
 from onboarding import mailbox_read, mailbox_update, mailboxes, pool_batches, pool_config
 from onboarding.errors import ErrorCode, ServiceError
@@ -18,7 +18,7 @@ _DIGEST = re.compile(r'[a-f0-9]{64}\Z')
 _FIELDS = ('model', 'region', 'instance_ref', 'group_ref', 'project_prefix',
            'timeout_seconds', 'concurrency', 'retention_days')
 _TASK = ('id', 'execution_scope', 'batch_id', 'config_id', 'config_revision', 'status',
-         'version', 'reason_code', 'current_step', 'generation', 'cancel_requested', 'synthetic')
+         'version', 'reason_code', 'current_step', 'generation', 'cancel_requested', 'synthetic', 'execution_mode')
 _MAILBOX = ('id', 'email', 'source_type', 'group_ref', 'health', 'disabled',
             'ever_registration_attempted', 'sale_eligibility', 'pool_status', 'version',
             'created_at', 'updated_at', 'last_used_at', 'occupied')
@@ -127,7 +127,12 @@ def register_routes(app, config):
     async def page(request: Request):
         context(request)
         query(request)
-        return FileResponse(Path(__file__).parent / 'static' / 'onboarding-pools.html', media_type='text/html')
+        from .onboarding_console import render_console
+        static = Path(__file__).parent / 'static'
+        page, _ = render_console((static / 'index.html').read_text(encoding='utf-8'),
+                                 pool_source=(static / 'onboarding-pools.html').read_text(encoding='utf-8'),
+                                 pool_mode=config.pool_mode)
+        return HTMLResponse(page)
 
     @router.get('/static/onboarding-pools.js')
     async def script(request: Request):
@@ -147,7 +152,13 @@ def register_routes(app, config):
                                   values.get('health'), values.get('occupied'), values.get('limit', 50))
         except (ValueError, TypeError, UnicodeError):
             invalid()
-        result = await run_in_threadpool(mailbox_read.list_page, *context(request), **values, **dependencies())
+        if config.pool_mode == 'live':
+            from onboarding import live_mailbox_read
+            from onboarding.async_runtime import settled_thread
+            result = await settled_thread(live_mailbox_read.list_page, *context(request), **values,
+                                          policy=config.live_policy, mac=config.pool_mac)
+        else:
+            result = await run_in_threadpool(mailbox_read.list_page, *context(request), **values, **dependencies())
         items = [{**project(item, _MAILBOX), 'platforms': [project(p, ('platform', 'identity_status',
             'usage_status', 'version', 'checked_at')) for p in item['platforms']]} for item in result.items]
         return {'items': items, 'next_cursor': result.next_cursor}
@@ -195,16 +206,23 @@ def register_routes(app, config):
 
     @router.get('/api/onboarding/config')
     async def get_config(request: Request):
+        if config.pool_mode == 'live':
+            from .onboarding_live_routes import config_get
+            return await config_get(request, config)
         query(request)
         result = await run_in_threadpool(pool_config.get_current, *context(request), policy=config.pool_policy,
                                         permission='config:manage')
         if result is None:
             return None
+        pool_config._require_synthetic(result)
         return {**project(result, ('id', 'revision', 'scope', 'secrets_configured', 'created_at')),
                 'nonsecret_config': project(result['nonsecret_config'], _FIELDS)}
 
     @router.put('/api/onboarding/config')
     async def replace_config(request: Request):
+        if config.pool_mode == 'live':
+            from .onboarding_live_routes import config_put
+            return await config_put(request, config)
         query(request)
         body = exact(await read_json(request), ('expected_revision', 'fields', 'request_key'))
         fields = pool_config._inputs(body['expected_revision'], body['fields'], body['request_key'])
@@ -237,6 +255,9 @@ def register_routes(app, config):
 
     @router.get('/api/onboarding/tasks')
     async def tasks(request: Request):
+        if config.pool_mode == 'live':
+            from .onboarding_live_routes import tasks_list
+            return await tasks_list(request, config)
         from onboarding import task_read
         values = query(request, ('scope', 'batch_id', 'cursor', 'limit'))
         if values.get('scope', 'all') not in ('all', 'fixture', 'pool'):
@@ -246,4 +267,28 @@ def register_routes(app, config):
         result = await run_in_threadpool(task_read.list_page, *context(request), **values, **dependencies())
         return {'items': [task_project(item, True) for item in result.items], 'next_cursor': result.next_cursor}
 
+    @router.get('/api/onboarding/tasks/{task_id}/events')
+    async def task_events(request: Request, task_id: str):
+        if config.pool_mode == 'live':
+            from .onboarding_live_routes import task_events as live_events
+            return await live_events(request, config, task_id)
+        from onboarding import task_events as events_service
+        query(request)
+        uuid(task_id)
+        result = await run_in_threadpool(events_service.read, *context(request), task_id,
+                                        policy=config.pool_policy)
+        response = {**project(result, ('task_id', 'mode', 'execution_connected', 'has_more')),
+                'events': [project(event, ('id', 'occurred_at', 'action', 'outcome', 'version'))
+                           for event in result['events']]}
+        if result['mode'] == 'live':
+            response.update(effects_has_more=result['effects_has_more'], effect_events=[
+                project(event, ('receipt_id', 'action', 'phase', 'result_code', 'version', 'updated_at'))
+                for event in result['effect_events']])
+        return response
+
     app.include_router(router)
+    from .onboarding_card_routes import register_routes as register_card_routes
+    register_card_routes(app, config)
+    if config.pool_mode == 'live':
+        from .onboarding_live_routes import register_routes as register_live_routes
+        register_live_routes(app, config)

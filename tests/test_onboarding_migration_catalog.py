@@ -45,7 +45,7 @@ class MigrationCatalogTests(unittest.TestCase):
                 self.refused(lambda: self.catalog.validate_applied(rows))
 
     def test_unknown_targets_and_bool_are_not_future_migrations(self):
-        for target in (0, 3, -1, True, 1.0, '1', None, []):
+        for target in (0, 5, -1, True, 1.0, '1', None, []):
             with self.subTest(type=type(target).__name__):
                 self.refused(lambda: self.catalog.expected_schema_versions(target), ErrorCode.INVALID_INPUT)
                 self.refused(lambda: self.catalog.load_migration(target), ErrorCode.INVALID_INPUT)
@@ -60,6 +60,14 @@ class MigrationCatalogTests(unittest.TestCase):
         for invalid in (rows[1:], rows[::-1], (rows[0], rows[0], rows[1])):
             self.refused(lambda: self.catalog.validate_applied(invalid))
         self.refused(lambda: self.catalog.validate_applied(rows[:1], minimum=2))
+
+    def test_reviewed_003_keeps_prior_checksums(self):
+        rows=self.catalog.expected_schema_versions(3)
+        self.assertEqual(len(rows),3)
+        self.assertEqual(rows[:2],self.catalog.expected_schema_versions(2))
+        self.assertEqual(hashlib.sha256(self.catalog.load_migration(3).encode()).hexdigest(),rows[2][1])
+        self.assertEqual(self.catalog.validate_applied(rows,minimum=3),3)
+        self.refused(lambda:self.catalog.validate_applied(rows[:2],minimum=3))
 
     def test_catalog_has_no_database_side_effects(self):
         with patch('socket.socket.connect', side_effect=AssertionError('network forbidden')), \

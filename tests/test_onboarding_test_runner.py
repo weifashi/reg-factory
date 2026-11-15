@@ -13,6 +13,11 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             selected_modules('unexpected')
 
+    def test_browser_suite_is_explicit_and_in_all(self):
+        from tools.onboarding_test_runner import selected_modules
+        self.assertEqual(selected_modules('browser'), ['test_onboarding_google_browser'])
+        self.assertTrue(set(selected_modules('browser')) <= set(selected_modules('all')))
+
     def test_skip_is_never_success(self):
         from tools.onboarding_test_runner import passed
         result = unittest.TestResult()
@@ -31,18 +36,26 @@ class RunnerTests(unittest.TestCase):
         from tools.onboarding_test_runner import selected_modules
         self.assertEqual(set(selected_modules('offline')), {
             'test_onboarding_dependencies', 'test_onboarding_migration_catalog',
-            'test_onboarding_mailbox_parser', 'test_onboarding_pool_secret_types',
+            'test_onboarding_mailbox_parser', 'test_onboarding_card_import', 'test_onboarding_pool_secret_types',
             'test_onboarding_request_mac', 'test_onboarding_mailbox_cursor',
-            'test_onboarding_pool_contracts', 'test_onboarding_not_committed_guard'})
+            'test_onboarding_pool_contracts', 'test_onboarding_not_committed_guard',
+            'test_onboarding_sub2api_probe', 'test_onboarding_sub2api_import',
+            'test_onboarding_google_cloud', 'test_onboarding_live_effects',
+            'test_onboarding_google_auth_runtime', 'test_onboarding_sub2api_target_runtime', 'test_onboarding_async_runtime', 'test_onboarding_executor_stop_proof', 'test_onboarding_db_lane',
+            'test_onboarding_live_input_vault', 'test_onboarding_live_mailbox_source', 'test_onboarding_live_config', 'test_onboarding_live_entry', 'test_onboarding_live_commands', 'test_onboarding_live_observe', 'test_onboarding_live_read', 'test_onboarding_live_manager', 'test_onboarding_live_runtime_v2'})
         self.assertEqual(set(selected_modules('pools')), {
             'test_onboarding_migration_sequence', 'test_onboarding_pool_schema',
-            'test_onboarding_pool_vault', 'test_onboarding_mailbox_import',
+            'test_onboarding_pool_vault', 'test_onboarding_cards', 'test_onboarding_card_management', 'test_onboarding_mailbox_import',
             'test_onboarding_mailbox_import_races', 'test_onboarding_mailbox_reads',
             'test_onboarding_mailbox_update', 'test_onboarding_mailbox_update_races',
             'test_onboarding_pool_config', 'test_onboarding_pool_config_races',
             'test_onboarding_pool_repository', 'test_onboarding_pool_leases',
             'test_onboarding_pool_commands', 'test_onboarding_pool_batches',
-            'test_onboarding_pool_preflight', 'test_onboarding_task_read'})
+            'test_onboarding_pool_preflight', 'test_onboarding_task_read',
+            'test_onboarding_safe_cancel', 'test_onboarding_live_effects_db',
+            'test_onboarding_live_adapter_integration', 'test_onboarding_live_runtime',
+            'test_onboarding_live_key_store', 'test_onboarding_live_run_store', 'test_onboarding_live_executor', 'test_onboarding_live_completion', 'test_onboarding_executor_db_lane',
+            'test_onboarding_live_input_vault_db', 'test_onboarding_live_config_db', 'test_onboarding_live_config_mode', 'test_onboarding_live_entry_db', 'test_onboarding_live_commands_db', 'test_onboarding_live_observe_db', 'test_onboarding_live_read_db', 'test_onboarding_live_manager_db', 'test_onboarding_live_mailbox_read', 'test_onboarding_live_api_db'})
 
     def test_web_group_explicitly_includes_pool_http_and_page(self):
         from tools.onboarding_test_runner import selected_modules
@@ -50,7 +63,11 @@ class RunnerTests(unittest.TestCase):
             'test_onboarding_route_guard', 'test_onboarding_routes',
             'test_onboarding_legacy_security', 'test_onboarding_lifecycle',
             'test_onboarding_pages', 'test_onboarding_test_runner',
-            'test_onboarding_pool_api', 'test_onboarding_pool_ui'})
+            'test_onboarding_pool_api', 'test_onboarding_pool_ui',
+            'test_onboarding_console', 'test_onboarding_console_ui', 'test_onboarding_unified_ui',
+            'test_onboarding_card_api', 'test_onboarding_card_runtime', 'test_onboarding_card_ui',
+            'test_onboarding_task_events', 'test_onboarding_run_layout', 'test_onboarding_run_ui',
+            'test_onboarding_mailbox_table', 'test_onboarding_live_boot', 'test_onboarding_live_api', 'test_onboarding_live_ui'})
 
     def test_server_fixture_isolates_pool_registration_and_static_samples(self):
         from onboarding_server_support import isolated_server

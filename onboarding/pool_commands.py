@@ -1,7 +1,8 @@
 """Historical pool management requests, not worker stop/execution permission.
 
 Each entry owns its transaction. Success means a command was durably accepted;
-no lease, hold, secret consumer, inspector or provider is invoked here.
+pause/recheck never release holds. Cancel may atomically release a proven never-started
+synthetic Google batch hold; no consumer, inspector or provider is invoked here.
 """
 import hmac
 import json
@@ -10,7 +11,7 @@ from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
 
-from . import audit, pool_config, pool_contracts, pool_repository, repository, security, storage
+from . import audit, pool_cancellation, pool_config, pool_contracts, pool_repository, repository, security, storage
 from .errors import ErrorCode, ServiceError
 from .pool_vault import SyntheticPoolPolicy
 from .request_mac import RequestMac
@@ -88,7 +89,8 @@ def _receipt(row, task, command, expected, key, digest):
     if not hmac.compare_digest(row[9], digest):
         raise ServiceError(ErrorCode.IDEMPOTENCY_CONFLICT)
     summary = row[12]
-    if not (row[7] == 'SUCCEEDED' and type(row[10]) is str and row[10] == 'COMMAND_ACCEPTED'
+    safe = command == 'cancel' and type(summary) is dict and summary.get('status') == 'CANCELLED_SAFE'
+    if not (row[7] == 'SUCCEEDED' and type(row[10]) is str and row[10] == ('CANCELLED_SAFE' if safe else 'COMMAND_ACCEPTED')
             and row[11] is None and type(summary) is dict
             and all(type(k) is str for k in summary) and set(summary) == _SUMMARY):
         _broken()
@@ -104,7 +106,7 @@ def _receipt(row, task, command, expected, key, digest):
     if command == 'recheck':
         if not _uuid(summary['inspect_step_id']):
             _broken()
-    elif (summary['inspect_step_id'] is not None or summary['status'] not in ('PAUSED', 'CONFLICT')
+    elif (summary['inspect_step_id'] is not None or summary['status'] not in (('PAUSED', 'CONFLICT', 'CANCELLED_SAFE') if command == 'cancel' else ('PAUSED', 'CONFLICT'))
           or command == 'cancel' and not summary['cancel_requested']):
         _broken()
     return {'receipt_id': str(row[0]), 'phase': 'SUCCEEDED'}
@@ -187,6 +189,8 @@ def _command(settings, actor, task_id, expected_version, request_key, command, *
             if task['version'] != expected_version:
                 raise ServiceError(ErrorCode.VERSION_CONFLICT)
             status, cancelled, marker = task['status'], task['cancel_requested'], None
+            receipt_id = str(uuid4())
+            reason, safe, release_reason = task['reason_code'], False, None
             if command == 'recheck':
                 marker = _marker(conn, actor, task)
             else:
@@ -195,21 +199,25 @@ def _command(settings, actor, task_id, expected_version, request_key, command, *
                 status = 'CONFLICT' if status == 'CONFLICT' else 'PAUSED'
                 if command == 'cancel':
                     cancelled = True
+                    release_reason = pool_cancellation.try_release(conn, actor, task, receipt_id)
+                    safe = release_reason == 'CANCEL_SAFE_RELEASED'
+                    if safe: status = 'CANCELLED_SAFE'
+                    # Retain a prior business error rather than erase it on a request.
+                    if safe or reason is None or reason in pool_cancellation.BLOCK_REASONS: reason = release_reason
             changed = conn.execute('UPDATE onboarding_tasks SET status=%s,cancel_requested=%s,'
-                                   'version=version+1,updated_at=clock_timestamp() '
+                                   'reason_code=%s,version=version+1,updated_at=clock_timestamp() '
                                    'WHERE id=%s AND version=%s '
                                    'RETURNING id,version,status,cancel_requested,generation',
-                                   (status, cancelled, task_id, expected_version)).fetchone()
+                                   (status, cancelled, reason, task_id, expected_version)).fetchone()
             _updated(changed, task, expected_version, status, cancelled)
             summary = dict(task_id=task_id, command=command, accepted_version=expected_version + 1,
                            status=status, cancel_requested=cancelled, generation=task['generation'],
                            inspect_step_id=marker)
-            receipt_id = str(uuid4())
             inserted = conn.execute('INSERT INTO operation_receipts (' + _RECEIPT_COLUMNS + ') '
-                "VALUES(%s,%s,NULL,%s,%s,%s,0,'SUCCEEDED',%s,%s,'COMMAND_ACCEPTED',NULL,%s) "
+                "VALUES(%s,%s,NULL,%s,%s,%s,0,'SUCCEEDED',%s,%s,%s,NULL,%s) "
                 'ON CONFLICT DO NOTHING RETURNING id',
                 (receipt_id, task_id, action, 'pool-command:' + task_id, task['generation'],
-                 request_key, digest, Jsonb(summary))).fetchone()
+                 request_key, digest, 'CANCELLED_SAFE' if safe else 'COMMAND_ACCEPTED', Jsonb(summary))).fetchone()
             # A conflict cannot turn already-performed candidate writes into replay.
             if inserted is None:
                 _broken()
@@ -217,7 +225,7 @@ def _command(settings, actor, task_id, expected_version, request_key, command, *
             if type(inserted[0]) is not UUID or str(inserted[0]) != receipt_id:
                 _broken()
             audit.append(conn, actor.operator_id, task_id, 'task.' + command, task_id,
-                         'ACCEPTED', receipt_id,
+                         'CANCELLED_SAFE' if safe else release_reason or 'ACCEPTED', receipt_id,
                          before_summary={'status': task['status'], 'version': task['version']},
                          after_summary={'status': status, 'version': expected_version + 1})
             result = {'receipt_id': receipt_id, 'phase': 'SUCCEEDED'}

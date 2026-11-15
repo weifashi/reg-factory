@@ -15,7 +15,7 @@ _ACTIONS = frozenset(('config.create', 'task.create', 'task.pause', 'task.cancel
                      'auth.operator_create', 'auth.operator_update', 'auth.bootstrap', 'auth.login',
                      'auth.login_failed', 'auth.logout', 'auth.session_touch', 'secret.put', 'secret.use', 'secret.rotate',
                      'secret.revoke', 'download.approve', 'download.issue', 'download.consume',
-                     'download.revoke', 'mailbox.import', 'mailbox.update'))
+                     'download.revoke', 'mailbox.import', 'mailbox.update', 'card.import', 'card.update'))
 _ENUMS = {
     'status': frozenset(('QUEUED', 'PREFLIGHT', 'RUNNING', 'PAUSED', 'WAIT_HUMAN', 'WAIT_ADMIN',
                          'WAIT_RESOURCE', 'RECONCILING', 'FAILED_CONFIRMED', 'CANCELLED_SAFE',
